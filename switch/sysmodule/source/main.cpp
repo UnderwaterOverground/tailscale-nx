@@ -495,8 +495,13 @@ namespace ams {
         void PowerThread(void *) {
             psc::PmState last = psc::PmState_FullAwake;
             bool suspended = false;
+            // Time between being asked and acknowledging, over a wake's steps
+            // (the system waits on every module, so this is our share).
+            u64 wake_held_ns = 0;
+            bool waking = false;
             for (;;) {
                 g_pm_module.GetEventPointer()->Wait();
+                const u64 asked = armTicksToNs(armGetSystemTick());
                 psc::PmState state;
                 psc::PmFlagSet flags;
                 if (R_FAILED(g_pm_module.GetRequest(std::addressof(state), std::addressof(flags)))) continue;
@@ -522,13 +527,19 @@ namespace ams {
                 }
                 if (suspended && state == psc::PmState_ShutdownReady) static_cast<void>(fs::DeleteFile(SleepingPath));
                 if (const Result rc = g_pm_module.Acknowledge(state, ResultSuccess()); R_FAILED(rc)) Log("power: acknowledge failed: 0x%x", rc.GetValue());
+                // Wake steps: from "essential services awake" up to full awake
+                // (a light sleep goes straight back to full awake).
+                if (state == psc::PmState_EssentialServicesAwake) waking = true;
+                if (suspended && (waking || state == psc::PmState_FullAwake)) wake_held_ns += armTicksToNs(armGetSystemTick()) - asked;
                 if (suspended && state == psc::PmState_FullAwake) {
                     g_log_udp_paused = false;
                     g_power_runtime->Resume(::tsnx::Runtime::kSleep);
                     suspended = false;
                     static_cast<void>(fs::DeleteFile(SleepingPath));
                     static_cast<void>(fs::DeleteFile(SleepFailuresPath));
-                    Log("power: awake; reconnecting");
+                    Log("power: awake; reconnecting (we held the wake for %llu us)", static_cast<unsigned long long>(wake_held_ns / 1000));
+                    wake_held_ns = 0;
+                    waking = false;
                 }
                 last = state;
             }

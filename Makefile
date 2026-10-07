@@ -15,7 +15,7 @@ else
   SW := docker run --rm -v "$(CURDIR)":/src -v tsnx-cargo-registry:/opt/cargo/registry -e CARGO_TARGET_DIR=/src/target/switch -w /src $(DOCKER_IMAGE)
 endif
 
-.PHONY: release overlay mitm-test nxlink-mitm-test all host-test host-c e2e sysmodule libstratosphere docker-image rust-switch nro nxlink clean
+.PHONY: publish release overlay mitm-test nxlink-mitm-test all host-test host-c e2e sysmodule libstratosphere docker-image rust-switch nro nxlink clean
 
 all: host-test nro
 
@@ -58,6 +58,12 @@ $(LIBSTRAT):
 
 sysmodule: rust-switch $(LIBSTRAT)
 	$(SW) make -C switch/sysmodule TSNX_BUILD_UNIX=$(BUILD_UNIX) dist
+
+# Publish to GitHub: only main and v* tags (the `github` remote's push
+# refspecs); other branches stay on the private Gitea. Pushing a v* tag
+# builds a draft release there.
+publish:
+	git push github
 
 # Release zip for the SD card root: dist/tailscale-nx-<version>.zip
 release:
