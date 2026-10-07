@@ -2,6 +2,7 @@
 
 [![Release](https://img.shields.io/github/v/release/UnderwaterOverground/tailscale-nx)](https://github.com/UnderwaterOverground/tailscale-nx/releases/latest)
 [![License](https://img.shields.io/badge/license-GPL--2.0%20%2F%20BSD--3-blue)](#license)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/GjUuBEqRYb)
 
 **Tailscale for the Nintendo Switch.** tailscale-nx runs in the background
 on a Switch with Atmosphère and puts it on your
@@ -92,9 +93,9 @@ coordinate keys and relay encrypted packets when a direct connection isn't
 possible.
 
 **Something's wrong.** See [troubleshooting](docs/SETUP.md#troubleshooting).
-The log is in `config/tailscale-nx/sysmodule.log` on the SD card. Please
-include it when you
+For help, ask on [Discord](https://discord.gg/GjUuBEqRYb) or
 [open an issue](https://github.com/UnderwaterOverground/tailscale-nx/issues).
+Please include the log, `config/tailscale-nx/sysmodule.log` on the SD card.
 
 ## Building
 

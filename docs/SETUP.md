@@ -177,3 +177,7 @@ more of it, up to the `overlay_budget_kb` limit.
 - **Moonlight finds the PC at home but not away.**
   - Check that Moonlight's saved host includes the tailnet name or `100.x`
     address, and that the overlay shows **Connected**.
+
+Still stuck? Ask on [Discord](https://discord.gg/GjUuBEqRYb) or
+[open an issue](https://github.com/UnderwaterOverground/tailscale-nx/issues),
+with your `sysmodule.log`.
