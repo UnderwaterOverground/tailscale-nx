@@ -1,0 +1,8 @@
+// Test tailnet access rules: everything is allowed except port 7777, which
+// run-tests.sh uses to check that tsnx enforces the rules for inbound
+// connections (as every Tailscale node must).
+{
+  "acls": [
+    {"action": "accept", "src": ["*"], "dst": ["*:1-7776", "*:7778-65535"]}
+  ]
+}

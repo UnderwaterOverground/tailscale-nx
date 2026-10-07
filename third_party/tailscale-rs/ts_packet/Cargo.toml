@@ -1,0 +1,23 @@
+[package]
+name = "ts_packet"
+version.workspace = true
+description = "tailscale packet types"
+categories = ["no-std", "network-programming"]
+keywords = ["tailscale", "packet", "network"]
+
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bytes.workspace = true
+crypto_box.workspace = true
+# tsnx: workspace version (default-features = false).
+stable_deref_trait.workspace = true
+yoke.workspace = true
+
+ts_util.workspace = true
+
+[lints]
+workspace = true

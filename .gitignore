@@ -1,0 +1,14 @@
+/target
+/switch/*/build
+*.nro
+*.nacp
+*.elf
+*.nso
+*.nsp
+*.npdm
+*.map
+/e2e/state
+.DS_Store
+/dist
+*.ovl
+/switch/sysmodule/dist

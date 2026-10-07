@@ -1,0 +1,22 @@
+[package]
+name = "ts_peercapability"
+version.workspace = true
+description = "tailscale peer capability definitions"
+categories = ["no-std::no-alloc"]
+keywords = ["tailscale", "peer", "capability"]
+
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+
+[dependencies]
+serde = { workspace = true, optional = true }
+url.workspace = true
+
+[features]
+serde = ["dep:serde"]
+
+[lints]
+workspace = true

@@ -1,0 +1,39 @@
+{
+  "ID": 1679275757477108,
+  "StableID": "nT8AH9jY7E11CNTRL",
+  "Name": "relay.tail252fff.ts.net.",
+  "User": 7326703659639870,
+  "Key": "nodekey:a57413f6734a12fa6f50e600891517deef4d324ea63de8915da511550a20a23f",
+  "KeyExpiry": "2026-01-25T18:31:27Z",
+  "DiscoKey": "discokey:7f12a1c47c70be1b4722d680b2442ccb517f194a9d24f28b8c9a165eb2f7b74a",
+  "Addresses": [
+    "100.96.162.64/32",
+    "fd7a:115c:a1e0::a01:a241/128"
+  ],
+  "AllowedIPs": null,
+  "Endpoints": [
+    "18.217.166.210:41641",
+    "172.31.33.196:41641"
+  ],
+  "HomeDERP": 1,
+  "DERP": "127.3.3.40:12",
+  "Hostinfo": {
+    "OS": "linux",
+    "Hostname": "relay",
+    "Services": [
+      {
+        "Proto": "peerapi4",
+        "Port": 36297
+      },
+      {
+        "Proto": "peerapi6",
+        "Port": 40008
+      }
+    ],
+    "sshHostKeys": null
+  },
+  "Created": "2025-07-29T18:31:27.550535802Z",
+  "Cap": 127,
+  "Tags": null,
+  "Online": true
+}

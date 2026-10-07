@@ -1,0 +1,5 @@
+# Test client image: Rust toolchain (to build tsnx for Linux) plus the
+# unmodified tools run through the interpose shim.
+FROM rust:1
+RUN apt-get update && apt-get install -y --no-install-recommends iperf3 tcpdump curl \
+    && rm -rf /var/lib/apt/lists/*

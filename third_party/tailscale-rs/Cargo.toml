@@ -1,0 +1,94 @@
+# Vendored subset of tailscale-rs (https://github.com/tailscale/tailscale-rs), ported to
+# `no_std + alloc` for tailscale-nx. See VENDORED.md for the upstream commit and the list of
+# modifications. This is a standalone workspace, excluded from the tsnx root workspace.
+#
+# Every dependency below is declared with `default-features = false` so that nothing pulls in
+# `std`, `getrandom` or `libc` when building for `aarch64-nintendo-switch-freestanding`.
+# Dev-dependencies (host tests only) may enable std features; with resolver 2+ those do not
+# leak into normal builds.
+
+[workspace]
+resolver = "3"
+members = [
+    "ts_capabilityversion",
+    "ts_control_serde",
+    "ts_disco_protocol",
+    "ts_keys",
+    "ts_nodecapability",
+    "ts_noise",
+    "ts_packet",
+    "ts_packetfilter_serde",
+    "ts_peercapability",
+    "ts_time",
+    "ts_tunnel",
+    "ts_util",
+]
+
+[workspace.package]
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+version = "0.6.1"
+repository = "https://github.com/tailscale/tailscale-rs"
+rust-version = "1.92.0"
+
+[workspace.dependencies]
+aead = { version = "0.5", default-features = false }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+blake2 = { version = "0.10", default-features = false }
+bytes = { version = "1", default-features = false }
+cfg-if = "1.0"
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+crypto_box = { version = "0.9", default-features = false, features = ["alloc", "salsa20"] }
+hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "inline-more", "equivalent"] }
+heapless = { version = "0.9", default-features = false }
+hex = "0.4"
+hkdf = { version = "0.12", default-features = false }
+ipnet = { version = "2.12", default-features = false }
+itertools = { version = "0.14", default-features = false, features = ["use_alloc"] }
+nom = { version = "8.0", default-features = false, features = ["alloc"] }
+num-derive = "0.4"
+num-traits = { version = "0.2", default-features = false }
+proptest = "1"
+rand = "0.10"
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+serde_repr = "0.1"
+serde_with = { version = "3", default-features = false, features = ["alloc", "macros"] }
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
+stable_deref_trait = { version = "1.2", default-features = false, features = ["alloc"] }
+thiserror = { version = "2", default-features = false }
+tracing = { version = "0.1", default-features = false, features = ["attributes"] }
+url = { version = "2", default-features = false }
+# tsnx: no "getrandom" feature; randomness comes from ts_util::rng (see VENDORED.md).
+x25519-dalek = { version = "3.0.0-pre.6", default-features = false, features = ["reusable_secrets", "static_secrets", "zeroize"] }
+yoke = { version = "0.8", default-features = false, features = ["alloc"] }
+zerocopy = { version = "0.8", default-features = false, features = ["derive"] }
+zeroize = { version = "1.8.2", default-features = false, features = ["alloc", "zeroize_derive"] }
+
+# local workspace deps
+ts_capabilityversion = { path = "ts_capabilityversion", version = "0.6.1" }
+ts_keys = { path = "ts_keys", version = "0.6.1" }
+ts_nodecapability = { path = "ts_nodecapability", version = "0.6.1" }
+ts_noise = { path = "ts_noise", version = "0.6.1" }
+ts_packet = { path = "ts_packet", version = "0.6.1" }
+ts_packetfilter_serde = { path = "ts_packetfilter_serde", version = "0.6.1" }
+ts_peercapability = { path = "ts_peercapability", version = "0.6.1" }
+ts_time = { path = "ts_time", version = "0.6.1" }
+ts_util = { path = "ts_util", version = "0.6.1", default-features = false }
+
+[workspace.lints.rust]
+let_underscore = "warn"
+missing_docs = "warn"
+
+[workspace.lints.rustdoc]
+bare_urls = "deny"
+broken_intra_doc_links = "deny"
+invalid_html_tags = "deny"
+private_intra_doc_links = "deny"
+
+[profile.release]
+lto = true
+opt-level = "s"
+panic = "abort"

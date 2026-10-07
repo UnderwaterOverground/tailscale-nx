@@ -1,0 +1,121 @@
+# Local tailnet for end-to-end tests: headscale (control + DERP + STUN) and a
+# stock tailscaled peer with echo services. tsnx clients join with the
+# pre-auth key written to state/authkey by setup.sh.
+name: tsnx-e2e
+
+networks:
+  tsnx:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+services:
+  headscale:
+    image: headscale/headscale:latest
+    command: serve
+    volumes:
+      - ./headscale/config.yaml:/etc/headscale/config.yaml:ro
+      - ./headscale/policy.hujson:/etc/headscale/policy.hujson:ro
+      - ./state/certs:/certs:ro
+      - ./state/headscale:/var/lib/headscale
+    networks:
+      tsnx:
+        ipv4_address: 172.30.0.10
+    ports:
+      - "127.0.0.1:8443:443"
+    healthcheck:
+      test: ["CMD", "headscale", "health"]
+      interval: 2s
+      retries: 30
+
+  # A real Tailscale node to talk to. Kernel networking so ping/UDP behave
+  # exactly as on a normal machine.
+  peer:
+    image: tailscale/tailscale:stable
+    hostname: peer1
+    environment:
+      TS_AUTHKEY: file:/state/authkey
+      TS_EXTRA_ARGS: --login-server=https://headscale
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      TS_HOSTNAME: peer1
+      SSL_CERT_FILE: /certs/ca.pem
+    volumes:
+      - ./state/certs:/certs:ro
+      - ./state:/state:ro
+      - ./state/peer:/var/lib/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    networks:
+      tsnx:
+        ipv4_address: 172.30.0.20
+    depends_on:
+      headscale:
+        condition: service_healthy
+    profiles: [peer]
+
+  # Echo services inside the peer's network namespace, reachable on its
+  # tailnet IP: TCP 7 and UDP 7 echo.
+  echo:
+    image: alpine/socat:latest
+    network_mode: service:peer
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        socat TCP-LISTEN:7,fork,reuseaddr EXEC:cat &
+        socat UDP-RECVFROM:7,fork EXEC:cat &
+        wait
+    depends_on: [peer]
+    profiles: [peer]
+
+  # HTTP (8080) and iperf3 (5201) servers on peer1's tailnet IP.
+  web:
+    image: python:3-alpine
+    network_mode: service:peer
+    command: ["python3", "-m", "http.server", "8080"]
+    depends_on: [peer]
+    profiles: [peer]
+
+  iperf:
+    image: networkstatic/iperf3
+    network_mode: service:peer
+    command: ["-s"]
+    depends_on: [peer]
+    profiles: [peer]
+
+  # tsnx-host built for Linux and run on the compose network, so direct UDP
+  # paths to peer1 are possible (the Mac cannot reach container IPs).
+  # Build:  docker compose run --rm tsnx-build
+  # Run:    docker compose run --rm tsnx up --control https://headscale ...
+  tsnx-build:
+    image: tsnx-e2e-client
+    build: { context: ., dockerfile: Dockerfile.client }
+    working_dir: /src
+    volumes:
+      - ..:/src
+      - tsnx-cargo:/usr/local/cargo/registry
+    environment:
+      CARGO_TARGET_DIR: /src/target/linux
+    entrypoint: ["/src/e2e/build-linux.sh"]
+    profiles: [tsnx]
+
+  tsnx:
+    image: tsnx-e2e-client
+    build: { context: ., dockerfile: Dockerfile.client }
+    working_dir: /src
+    volumes:
+      - ..:/src:ro
+      - ./state:/state
+    environment:
+      TSNX_EXTRA_ROOT: /state/certs/ca.der
+      RUST_LOG: ${RUST_LOG:-info}
+    entrypoint: ["/src/target/linux/bin/tsnx-host"]
+    cap_add: [NET_ADMIN]
+    networks:
+      tsnx:
+        ipv4_address: 172.30.0.30
+    profiles: [tsnx]
+
+volumes:
+  tsnx-cargo:

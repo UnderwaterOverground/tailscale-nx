@@ -1,0 +1,30 @@
+[package]
+name = "ts_keys"
+version.workspace = true
+description = "tailscale cryptographic key types"
+categories = ["cryptography"]
+keywords = ["tailscale", "keys"]
+
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+zerocopy.workspace = true
+serde = { workspace = true, optional = true }
+x25519-dalek.workspace = true
+crypto_box.workspace = true
+zeroize.workspace = true
+# tsnx: randomness for key generation comes from the injected ts_util::rng hook.
+ts_util.workspace = true
+
+[dev-dependencies]
+ts_util = { workspace = true, features = ["insecure-test-rng"] }
+
+[features]
+serde = ["dep:serde"]
+
+[lints]
+workspace = true

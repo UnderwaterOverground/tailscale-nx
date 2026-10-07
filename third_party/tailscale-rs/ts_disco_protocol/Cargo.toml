@@ -1,0 +1,38 @@
+[package]
+name = "ts_disco_protocol"
+version.workspace = true
+description = "tailscale disco protocol definition"
+categories = ["network-programming", "no-std::no-alloc", "encoding"]
+keywords = ["tailscale", "disco", "protocol"]
+
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aead.workspace = true
+thiserror.workspace = true
+zerocopy.workspace = true
+crypto_box.workspace = true
+
+# tsnx: use workspace versions (default-features = false for num-traits).
+num-traits.workspace = true
+num-derive.workspace = true
+
+ts_keys.workspace = true
+ts_util.workspace = true
+
+[dev-dependencies]
+# tsnx: test RNG for key generation (see ts_util::rng).
+ts_util = { workspace = true, features = ["insecure-test-rng"] }
+zerocopy = { workspace = true, features = ["std"] }
+
+rand.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["alloc"]
+alloc = []

@@ -1,0 +1,6 @@
+[submodule "third_party/Atmosphere"]
+	path = third_party/Atmosphere
+	url = https://github.com/Atmosphere-NX/Atmosphere.git
+[submodule "third_party/libtesla"]
+	path = third_party/libtesla
+	url = https://github.com/WerWolv/libtesla.git

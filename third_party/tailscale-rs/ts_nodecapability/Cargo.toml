@@ -1,0 +1,25 @@
+[package]
+name = "ts_nodecapability"
+version.workspace = true
+description = "tailscale node capability definitions"
+categories = ["no-std"]
+keywords = ["tailscale", "node", "capability"]
+
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Unconditionally required dependencies.
+cfg-if.workspace = true
+
+# Required dependencies for the "serde" feature.
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true, features = ["raw_value"] }
+
+[features]
+serde = ["dep:serde", "dep:serde_json"]
+
+[lints]
+workspace = true

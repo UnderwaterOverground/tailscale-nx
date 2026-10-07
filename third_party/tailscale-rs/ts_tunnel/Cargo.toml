@@ -1,0 +1,45 @@
+[package]
+name = "ts_tunnel"
+version.workspace = true
+description = "secure packet tunnel over udp"
+categories = ["cryptography", "network-programming", "encoding"]
+keywords = ["tailscale", "wireguard", "tunnel", "udp", "sans-io"]
+
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Our crates.
+ts_keys.workspace = true
+ts_packet.workspace = true
+ts_time.workspace = true
+ts_noise.workspace = true
+# tsnx: injected RNG (replaces rand::random).
+ts_util.workspace = true
+
+# Unconditionally required dependencies.
+aead.workspace = true
+blake2.workspace = true
+chacha20poly1305.workspace = true
+# tsnx: hashbrown replaces std::collections::HashMap.
+hashbrown.workspace = true
+# tsnx: spin::Mutex replaces std::sync::Mutex.
+spin.workspace = true
+zerocopy.workspace = true
+
+# tsnx: tracing is optional and off by default.
+tracing = { workspace = true, optional = true }
+
+[features]
+default = []
+tracing = ["dep:tracing"]
+
+[dev-dependencies]
+# tsnx: examples (tokio/clap based) were not vendored.
+proptest.workspace = true
+ts_util = { workspace = true, features = ["insecure-test-rng"] }
+
+[lints]
+workspace = true

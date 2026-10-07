@@ -1,0 +1,35 @@
+[package]
+name = "ts_control_serde"
+version.workspace = true
+description = "serde data types for tailscale control comms"
+categories = ["encoding", "api-bindings"]
+keywords = ["tailscale", "serde", "control"]
+
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Our crates.
+ts_capabilityversion = { workspace = true, features = ["serde"] }
+ts_keys = { workspace = true, features = ["serde"] }
+ts_nodecapability = { workspace = true, features = ["serde"] }
+ts_packetfilter_serde.workspace = true
+
+# Unconditionally required dependencies.
+base64.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+ipnet = { workspace = true, features = ["serde"] }
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+serde_with.workspace = true
+serde_repr.workspace = true
+url = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+# tsnx: the integration tests use std.
+serde_json = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true

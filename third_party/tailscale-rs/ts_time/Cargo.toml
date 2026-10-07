@@ -1,0 +1,21 @@
+[package]
+name = "ts_time"
+version.workspace = true
+description = "time- and scheduling-oriented utilities for tailscale"
+categories = ["date-and-time", "data-structures"]
+keywords = ["tailscale", "time", "schedule"]
+
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# tsnx: spin::Mutex replaces std::sync::Mutex.
+spin.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

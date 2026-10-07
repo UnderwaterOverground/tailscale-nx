@@ -1,0 +1,71 @@
+# headscale config for local end-to-end tests. Everything stays on the
+# compose network: TLS uses a throwaway CA from gen-certs.sh, and DERP/STUN are
+# served by headscale's embedded server, so no internet access is needed.
+server_url: https://headscale:443
+listen_addr: 0.0.0.0:443
+metrics_listen_addr: 0.0.0.0:9090
+grpc_listen_addr: 127.0.0.1:50443
+grpc_allow_insecure: false
+
+tls_cert_path: /certs/headscale.pem
+tls_key_path: /certs/headscale.key
+
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+
+prefixes:
+  v4: 100.64.0.0/10
+  v6: fd7a:115c:a1e0::/48
+  allocation: sequential
+
+derp:
+  server:
+    enabled: true
+    region_id: 999
+    region_code: "e2e"
+    region_name: "e2e embedded DERP"
+    verify_clients: true
+    stun_listen_addr: "0.0.0.0:3478"
+    private_key_path: /var/lib/headscale/derp_server_private.key
+    automatically_add_embedded_derp_region: true
+    ipv4: 172.30.0.10
+  urls: []
+  paths: []
+  auto_update_enabled: false
+  update_frequency: 24h
+
+disable_check_updates: true
+
+node:
+  expiry: 0
+  ephemeral:
+    inactivity_timeout: 30m
+
+database:
+  type: sqlite
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+    write_ahead_log: true
+
+log:
+  level: debug
+  format: text
+
+policy:
+  mode: file
+  path: /etc/headscale/policy.hujson
+
+dns:
+  magic_dns: true
+  base_domain: e2e.tsnx.test
+  override_local_dns: false
+  nameservers:
+    global: []
+  search_domains: []
+  extra_records: []
+
+unix_socket: /var/run/headscale/headscale.sock
+unix_socket_permission: "0770"
+
+logtail:
+  enabled: false

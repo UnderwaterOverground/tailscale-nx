@@ -1,0 +1,19 @@
+[package]
+name = "tsnx-ffi"
+description = "C ABI over tsnx-core, linked into the Switch app/sysmodule and host shims"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["staticlib"]
+
+# On Horizon the crate is no_std and gets its allocator and panic hook from the
+# C side (src/platform.rs); elsewhere it links std.
+[dependencies]
+tsnx-core.workspace = true
+log.workspace = true
+
+[features]
+# Use the Switch's overlay buffer limits on hosts (memory tests).
+switch-limits = ["tsnx-core/switch-limits"]

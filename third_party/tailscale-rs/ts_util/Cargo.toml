@@ -1,0 +1,30 @@
+[package]
+name = "ts_util"
+version.workspace = true
+description = "tailscale futures utilities"
+categories = ["asynchronous"]
+keywords = ["tailscale", "futures", "async"]
+
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+heapless.workspace = true
+
+# tsnx: the tokio/futures based `futures` module was not vendored.
+
+[features]
+# tsnx: default features no longer include tokio.
+default = []
+
+std = ["alloc"]
+alloc = []
+
+# tsnx: fall back to a fast, NON-cryptographic PRNG when no RNG hook is registered.
+# Only for host unit tests (enabled via dev-dependencies). Never enable it in real builds.
+insecure-test-rng = []
+
+[lints]
+workspace = true

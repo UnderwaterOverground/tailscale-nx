@@ -1,0 +1,39 @@
+# Pushing a tag like v1.0.0 builds the release zip in the same Docker image as
+# local builds and attaches it to a draft GitHub release. Review the draft,
+# then publish it.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Check the tag matches the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME but Cargo.toml says $version"; exit 1; }
+
+      - name: Build the image
+        run: make docker-image
+
+      - name: Build the release zip
+        run: make release
+
+      - name: Create a draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: dist/tailscale-nx-*.zip

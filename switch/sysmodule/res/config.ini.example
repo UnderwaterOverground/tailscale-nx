@@ -1,0 +1,22 @@
+# tailscale-nx configuration: copy to config.ini and edit. Everything is
+# optional; see the setup guide linked from the tailscale-nx README.
+# Changes apply after a restart.
+control_url=https://controlplane.tailscale.com
+# Joins without the log-in link. Create one at
+# https://login.tailscale.com/admin/settings/keys (reusable on, ephemeral
+# off). It can add devices to your tailnet: keep this file private, or delete
+# the line once the Switch has joined.
+# auth_key=tskey-auth-...
+hostname=nintendo-switch
+# Which programs' sockets can reach the tailnet: homebrew (default), off, or
+# homebrew,sys-ftpd to also serve sys-ftpd on the console's tailnet address
+# (restarts sys-ftpd once at boot; about 70 KB more memory).
+# mitm=homebrew
+# Memory for tailnet sockets, shared by all apps (KB, 128-512, default 320).
+# TCP connections get smaller buffers as it fills, so about 17 fit at once by
+# default; raise it only if apps report "no buffer space" (errno 105). It
+# comes out of the sysmodule's fixed 1 MB heap.
+# overlay_budget_kb=320
+# A 5-second "Connected. IP: ..." toast after each boot (also switchable in
+# the overlay).
+# connect_notice=on

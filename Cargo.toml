@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = ["crates/tsnx-core", "crates/tsnx-ffi", "crates/tsnx-host"]
+exclude = ["third_party"]
+
+[workspace.package]
+edition = "2021"
+license = "BSD-3-Clause"
+version = "1.0.0"
+
+[workspace.dependencies]
+tsnx-core = { path = "crates/tsnx-core", default-features = false }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
+blake2 = { version = "0.10", default-features = false }
+hex-literal = "0.4"
+rustls = { version = "0.23.45", default-features = false }
+webpki-roots = "1"
+sha2 = { version = "0.10", default-features = false, features = ["oid"] }
+hmac = { version = "0.12", default-features = false }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+p384 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+rsa = { version = "0.9", default-features = false }
+rand_core = { version = "0.6", default-features = false }
+rand_chacha = { version = "0.3", default-features = false }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+crypto_box = { version = "0.9", default-features = false, features = ["alloc", "salsa20"] }
+zerocopy = { version = "0.8", default-features = false }
+smoltcp = { version = "0.14", default-features = false, features = ["alloc", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-icmp", "auto-icmp-echo-reply"] }
+log = { version = "0.4", default-features = false }
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
+
+[profile.release]
+panic = "abort"
+# Size matters on the Switch (custom sysmodules share ~16 MB): optimise for
+# size, except the per-byte data path (ChaCha20-Poly1305 for every tunnel
+# packet), which keeps full optimisation below. Handshake-rate code
+# (X25519, BLAKE2s, ECDSA) and per-packet bookkeeping are fine at "z".
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+debug = 1
+
+[profile.dev]
+panic = "abort"
+
+[profile.release.package.chacha20]
+opt-level = 3
+[profile.release.package.poly1305]
+opt-level = 3
+[profile.release.package.chacha20poly1305]
+opt-level = 3
