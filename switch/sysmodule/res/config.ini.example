@@ -20,3 +20,5 @@ hostname=nintendo-switch
 # A 5-second "Connected. IP: ..." toast after each boot (also switchable in
 # the overlay).
 # connect_notice=on
+# Reach networks shared by your tailnet's subnet routers (off: ignore them).
+# accept_routes=on

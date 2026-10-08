@@ -105,7 +105,15 @@ public:
     // there) or only once it sends to a tailnet address, which saves its
     // buffers for the many sockets that never do. Default: right away.
     void SetEagerDualUdp(bool eager) { eager_dual_udp_ = eager; }
+    // Tailnet addresses, plus subnet routes in use (SetRoutes) except ones
+    // overlapping our own LAN: the local network is reached directly.
     static bool IsTailnet(const sockaddr *addr);
+    // The engine's subnet routes (tsnx_engine_routes), from its thread when
+    // peers change. At most MaxRoutes are used.
+    static constexpr size_t MaxRoutes = 64;
+    static void SetRoutes(const TsnxPrefix *routes, size_t n);
+    // Our LAN: IPv4 address (host byte order; 0 = offline) and prefix length.
+    static void SetLocalNet(uint32_t ip, unsigned len);
 
 private:
     struct VFd {

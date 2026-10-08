@@ -111,6 +111,18 @@ Until either happens, the Switch can't reach the tailnet.
   (ovl-sysmodules), turn off tailscale-nx's boot setting and restart. It can't be stopped while it
   runs, because Atmosphère would freeze if its socket hook disappeared.
 
+## Subnet routes
+
+If a device in your tailnet is a
+[subnet router](https://tailscale.com/kb/1019/subnets), homebrew can reach
+the networks it shares, e.g. a PC at home at `192.168.1.20` that doesn't run
+Tailscale. This is on by default (`accept_routes=off` turns it off).
+
+- When the Switch is itself on a network that a route covers (at home, for
+  example), it reaches that network directly instead.
+- Exit nodes aren't supported: internet traffic never goes through
+  Tailscale.
+
 ## Access rules
 
 tailscale-nx enforces your tailnet's
@@ -131,6 +143,7 @@ All settings are optional. They take effect after a restart.
 | `control_url` | `https://controlplane.tailscale.com` | Your headscale URL, if you use headscale |
 | `magicdns` | `on` | `off` stops writing tailnet names to the hosts file |
 | `connect_notice` | `on` | `off` turns off the "Connected" toast at boot (as does the overlay switch) |
+| `accept_routes` | `on` | `off` ignores your tailnet's [subnet routes](#subnet-routes) |
 | `mitm` | `homebrew` | Which programs can reach the tailnet: `homebrew`, `off`, or `homebrew,sys-ftpd` (see below) |
 | `overlay_budget_kb` | `320` | Memory for tailnet sockets, shared by all apps (128–512). Raise it only if apps report "no buffer space". |
 | `ca_cert` | none | Extra CA certificate (DER) for a self-signed headscale |

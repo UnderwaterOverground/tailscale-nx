@@ -167,6 +167,16 @@ void tsnx_net_close(TsnxEngine *e, int32_t id);
 int32_t tsnx_net_local_addr(TsnxEngine *e, int32_t id, TsnxAddr *out);
 int32_t tsnx_net_peer_addr(TsnxEngine *e, int32_t id, TsnxAddr *out);
 
+// Subnet routes (like `tailscale up --accept-routes`; off by default).
+typedef struct {
+    uint8_t family;  // 4 or 6
+    uint8_t len;     // prefix length
+    uint8_t ip[16];  // IPv4 uses the first 4 bytes
+} TsnxPrefix;
+void tsnx_engine_set_accept_routes(TsnxEngine *e, bool on);
+// Copies up to cap routes in use into out; returns how many there are.
+size_t tsnx_engine_routes(TsnxEngine *e, TsnxPrefix *out, size_t cap);
+
 // Must be provided by the embedding program on no_std targets. Called with a
 // (non NUL-terminated) panic message; must not return.
 #ifdef __cplusplus

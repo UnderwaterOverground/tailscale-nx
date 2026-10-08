@@ -21,6 +21,8 @@ without opening ports on your router.
 - **Homebrew reaches your tailnet:** apps launched from hbmenu can connect
   to `100.x.y.z` addresses and tailnet names (MagicDNS). Nothing to set up
   per app.
+- **Subnet routes:** reach devices on networks your tailnet shares through a
+  subnet router, such as a PC at home that doesn't run Tailscale.
 - **Direct connections** between devices where possible, with Tailscale's
   relays (DERP) as a fallback, just like the official clients.
 - **Overlay** (Ultrahand): status, the Switch's tailnet IP, a pause switch,
@@ -70,8 +72,8 @@ and use that instead, which is fine. Away from home, it uses the tailnet.
 - **Homebrew only**, and only apps launched from hbmenu. Games, Nintendo's
   apps and homebrew started from a home-screen forwarder don't use the
   tailnet.
-- **No subnet routes or exit nodes:** only tailnet addresses
-  (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) go through Tailscale.
+- **No exit nodes:** only tailnet addresses and your tailnet's subnet routes
+  go through Tailscale.
 - **No Taildrop or Tailscale SSH.**
 - The Switch connects to the internet over **IPv4 only** (tailnet IPv6
   addresses work).

@@ -10,7 +10,7 @@
 //                                    mitm=homebrew|homebrew,sys-ftpd|off,
 //                                    magicdns=on|off,
 //                                    overlay_budget_kb=<128..512>,
-//                                    connect_notice=on|off)
+//                                    connect_notice=on|off, accept_routes=on|off)
 //   config/tailscale-nx/state        node keys, shared with the app
 //   config/tailscale-nx/disabled     kill switch: if present, exit at boot
 //   config/tailscale-nx/crashed      written after 3 boots in a row that ended
@@ -46,6 +46,7 @@ extern "C" {
 #include "hosts.hpp"
 #include "log.hpp"
 #include "runtime.hpp"
+#include "vsock.hpp"
 #include "stack_watch.hpp"
 #include "status.hpp"
 
@@ -237,6 +238,7 @@ namespace ams {
             char magicdns[8] = "on";      // tailnet names in Atmosphere's hosts file, or "off"
             char overlay_budget_kb[8] = {};  // tailnet socket buffers; default 320
             char connect_notice[8] = "on";   // toast with our address when first connected
+            char accept_routes[8] = "on";    // use peers' subnet routes
         };
 
         void LoadConfig(Config &c) {
@@ -261,6 +263,7 @@ namespace ams {
                 set("magicdns", c.magicdns, sizeof c.magicdns);
                 set("overlay_budget_kb", c.overlay_budget_kb, sizeof c.overlay_budget_kb);
                 set("connect_notice", c.connect_notice, sizeof c.connect_notice);
+                set("accept_routes", c.accept_routes, sizeof c.accept_routes);
             }
         }
 
@@ -354,6 +357,16 @@ namespace ams {
         u32 CurrentIp() {
             u32 ip = 0;
             return R_SUCCEEDED(nifmGetCurrentIpAddress(&ip)) ? ip : 0;
+        }
+
+        // Tells the MITM our LAN (subnet routes overlapping it stay local).
+        void SetLocalNet(u32 ip) {
+            u32 cur = 0, mask = 0, gw = 0, dns1 = 0, dns2 = 0;
+            unsigned len = 32;
+            if (ip && R_SUCCEEDED(nifmGetCurrentIpConfigInfo(&cur, &mask, &gw, &dns1, &dns2)) && cur == ip) {
+                len = static_cast<unsigned>(__builtin_popcount(mask));
+            }
+            ::tsnx::VSock::SetLocalNet(ntohl(ip), len);
         }
 
         // The network clock if synced, else the user clock.
@@ -691,6 +704,7 @@ namespace ams {
         while (!NetworkUp()) os::SleepThread(TimeSpan::FromSeconds(1));
         u32 ip = CurrentIp();
         Log("network up, local address %s", inet_ntoa(in_addr{ip}));
+        SetLocalNet(ip);
         FlushEarlyLog();
 
         // Only a dev setup (self-signed control/DERP) has one; the engine
@@ -735,7 +749,20 @@ namespace ams {
             if ((ev->kind == TSNX_EVENT_PEERS || ev->kind == TSNX_EVENT_ADDRESSES) && hosts_dirty_since == 0) {
                 hosts_dirty_since = armTicksToNs(armGetSystemTick());
             }
+            if (ev->kind == TSNX_EVENT_PEERS) {
+                // Subnet routes for the MITM (64 * 18 bytes: static, not stack).
+                static TsnxPrefix routes[::tsnx::VSock::MaxRoutes];
+                const size_t n = tsnx_engine_routes(static_cast<TsnxEngine *>(ctx), routes, ::tsnx::VSock::MaxRoutes);
+                static size_t logged = SIZE_MAX;
+                if (n != logged) {
+                    logged = n;
+                    Log("subnet routes in use: %zu%s", n, n > ::tsnx::VSock::MaxRoutes ? " (only the first 64 are used)" : "");
+                }
+                ::tsnx::VSock::SetRoutes(routes, std::min(n, ::tsnx::VSock::MaxRoutes));
+            }
         }, engine);
+        const bool accept_routes = std::strcmp(cfg.accept_routes, "off") != 0;
+        tsnx_engine_set_accept_routes(engine, accept_routes);
         const bool magicdns = std::strcmp(cfg.magicdns, "off") != 0;
         if (cfg.overlay_budget_kb[0]) {
             // Bounded by the sysmodule's 1 MB heap: the engine and the
@@ -811,6 +838,7 @@ namespace ams {
                 if (cur != ip) {
                     Log("local address changed: %s", cur ? inet_ntoa(in_addr{cur}) : "(offline)");
                     ip = cur;
+                    SetLocalNet(cur);
                     if (cur) tsnx_driver_refresh_endpoints(d);
                 }
             }

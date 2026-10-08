@@ -30,6 +30,9 @@ struct RuntimeConfig {
     std::string extra_root_path;  // optional DER root certificate
     std::string connect_map;      // optional dev address rewrites
     uint16_t udp_port = 0;
+    // Use peers' subnet routes (the socket layer then sends them through
+    // the engine).
+    bool accept_routes = false;
     // Called on the engine thread with the lock held; must not call back in.
     std::function<void(const TsnxEvent &)> on_event;
 };

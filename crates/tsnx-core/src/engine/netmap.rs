@@ -80,15 +80,11 @@ impl Node<'_> {
         parse_prefixes(self.addresses.as_deref())
     }
 
-    /// Addresses plus any routes the node is allowed to source.
-    pub fn allowed_prefixes(&self) -> Vec<Prefix> {
-        let mut out = self.addresses();
-        for p in parse_prefixes(self.allowed_ips.as_deref()) {
-            if !out.contains(&p) {
-                out.push(p);
-            }
-        }
-        out
+    /// Subnet routes the node serves: allowed IPs beyond its own addresses,
+    /// except default routes (an exit node's, used only if selected).
+    pub fn subnet_routes(&self) -> Vec<Prefix> {
+        let own = self.addresses();
+        parse_prefixes(self.allowed_ips.as_deref()).into_iter().filter(|p| p.len != 0 && !own.contains(p)).collect()
     }
 
     pub fn endpoints(&self) -> Vec<SocketAddr> {
@@ -260,7 +256,7 @@ mod tests {
         "Peers": [
             {"ID": 7, "Name": "peer é.ts.net.", "Key": "nodekey:0202020202020202020202020202020202020202020202020202020202020202",
              "DiscoKey": "discokey:0303030303030303030303030303030303030303030303030303030303030303",
-             "Addresses": ["100.64.0.7/32"], "AllowedIPs": ["100.64.0.7/32", "10.0.0.0/8"],
+             "Addresses": ["100.64.0.7/32"], "AllowedIPs": ["100.64.0.7/32", "10.0.0.0/8", "0.0.0.0/0", "::/0"],
              "Endpoints": ["198.51.100.4:41641", "[2001:db8::1]:41641"], "HomeDERP": 1, "CapMap": {"x": [1, 2]}},
             {"ID": 8, "Key": "nodekey:0404040404040404040404040404040404040404040404040404040404040404",
              "Addresses": null, "AllowedIPs": null, "Endpoints": null, "DERP": "127.3.3.40:900"}
@@ -291,11 +287,12 @@ mod tests {
         let peers = m.peers.as_ref().unwrap();
         assert_eq!(peers[0].name, "peer é.ts.net.");
         assert!(peers[0].key().is_some() && peers[0].disco_key().is_some());
-        assert_eq!(peers[0].allowed_prefixes(), [parse_prefix("100.64.0.7/32").unwrap(), parse_prefix("10.0.0.0/8").unwrap()]);
+        assert_eq!(peers[0].addresses(), [parse_prefix("100.64.0.7/32").unwrap()]);
         assert_eq!(peers[0].endpoints().len(), 2);
         assert_eq!(peers[0].home_derp(), Some(1));
         assert_eq!(peers[1].home_derp(), Some(900));
-        assert!(peers[1].allowed_prefixes().is_empty() && peers[1].endpoints().is_empty());
+        assert!(peers[1].subnet_routes().is_empty() && peers[1].endpoints().is_empty());
+        assert_eq!(peers[0].subnet_routes(), [parse_prefix("10.0.0.0/8").unwrap()]);
 
         assert_eq!(m.peers_removed.as_deref(), Some(&[3][..]));
         let patch = &m.peers_changed_patch.as_ref().unwrap()[0];

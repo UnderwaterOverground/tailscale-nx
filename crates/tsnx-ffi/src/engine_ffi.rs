@@ -495,3 +495,40 @@ pub unsafe extern "C" fn tsnx_net_peer_addr(e: *mut TsnxEngine, id: i32, out: *m
         None => TSNX_ENOTCONN,
     }
 }
+
+// ---- subnet routes --------------------------------------------------------
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TsnxPrefix {
+    /// 4 or 6.
+    pub family: u8,
+    pub len: u8,
+    /// IPv4 uses the first 4 bytes.
+    pub ip: [u8; 16],
+}
+
+/// Uses (or stops using) peers' subnet routes. Off by default.
+#[no_mangle]
+pub unsafe extern "C" fn tsnx_engine_set_accept_routes(e: *mut TsnxEngine, on: bool) {
+    (*e).engine.set_accept_routes(on);
+}
+
+/// Copies up to `cap` subnet routes in use into `out`; returns how many
+/// there are in all.
+#[no_mangle]
+pub unsafe extern "C" fn tsnx_engine_routes(e: *mut TsnxEngine, out: *mut TsnxPrefix, cap: usize) -> usize {
+    let routes = (*e).engine.routes();
+    for (i, (addr, len)) in routes.iter().take(cap).enumerate() {
+        let mut p = TsnxPrefix { family: 4, len: *len, ip: [0; 16] };
+        match addr {
+            IpAddr::V4(a) => p.ip[..4].copy_from_slice(&a.octets()),
+            IpAddr::V6(a) => {
+                p.family = 6;
+                p.ip = a.octets();
+            }
+        }
+        *out.add(i) = p;
+    }
+    routes.len()
+}

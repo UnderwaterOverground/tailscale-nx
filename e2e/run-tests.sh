@@ -139,4 +139,25 @@ else
 fi
 docker rm -f "$EXP" >/dev/null 2>&1
 
+# 10. Subnet routes: peer1 serves 10.123.0.0/24 (its web server answers on
+# 10.123.0.1, an address only it has), which we use only when accepting routes.
+hs() { docker compose exec -T headscale headscale "$@" 2>/dev/null; }
+peer sh -c 'ip addr show dev lo | grep -q 10.123.0.1 || ip addr add 10.123.0.1/32 dev lo'
+peer tailscale set --advertise-routes=10.123.0.0/24
+peer_id=$(hs nodes list -o json | python3 -c "import json,sys; print(next(n['id'] for n in json.load(sys.stdin) if n.get('given_name')=='peer1'))")
+hs nodes approve-routes -i "$peer_id" -r 10.123.0.0/24 >/dev/null
+routed() {  # TSNX_ACCEPT_ROUTES value
+  docker compose run --rm -T -e TSNX_CONTROL_URL=https://headscale -e TSNX_EXTRA_ROOT=/state/certs/ca.der \
+    -e TSNX_STATE=/state/host/routes.state -e TSNX_AUTHKEY="$(cat state/authkey)" -e TSNX_HOSTNAME=tsnx-routes \
+    -e TSNX_PORT=41647 -e TSNX_WAIT_READY=1 -e TSNX_ACCEPT_ROUTES="$1" -e LD_PRELOAD=/src/target/linux/libtsnx_interpose.so \
+    --entrypoint sh tsnx -c "curl -s -m 8 http://10.123.0.1:8080/"
+}
+if routed 1 2>/dev/null | grep -q "<html" && ! routed 0 2>/dev/null | grep -q "<html"; then
+  pass "subnet routes (used only when accepted)"
+else
+  fail "subnet routes"
+fi
+peer tailscale set --advertise-routes=
+peer ip addr del 10.123.0.1/32 dev lo
+
 [[ $fails -eq 0 ]] && echo "all e2e tests passed" || { echo "$fails e2e test(s) failed"; exit 1; }
