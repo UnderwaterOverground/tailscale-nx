@@ -22,3 +22,5 @@ hostname=nintendo-switch
 # connect_notice=on
 # Receive files sent with Taildrop into the Taildrop folder on the SD card.
 # taildrop=on
+# Reach networks shared by your tailnet's subnet routers (off: ignore them).
+# accept_routes=on

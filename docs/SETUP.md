@@ -140,6 +140,18 @@ like to any of your devices: **Send with Tailscale** in the share menu
   Tailscale and on headscale.
 - Turn it off with `taildrop=off` in `config.ini`.
 
+## Subnet routes
+
+If a device in your tailnet is a
+[subnet router](https://tailscale.com/kb/1019/subnets), homebrew can reach
+the networks it shares, e.g. a PC at home at `192.168.1.20` that doesn't run
+Tailscale. This is on by default (`accept_routes=off` turns it off).
+
+- When the Switch is itself on a network that a route covers (at home, for
+  example), it reaches that network directly instead.
+- Exit nodes aren't supported: internet traffic never goes through
+  Tailscale.
+
 ## Access rules
 
 tailscale-nx enforces your tailnet's
@@ -161,6 +173,7 @@ All settings are optional. They take effect after a restart.
 | `magicdns` | `on` | `off` stops writing tailnet names to the hosts file |
 | `connect_notice` | `on` | `off` turns off the "Connected" toast at boot (as does the overlay switch) |
 | `taildrop` | `on` | `off` stops receiving files with [Taildrop](#taildrop) |
+| `accept_routes` | `on` | `off` ignores your tailnet's [subnet routes](#subnet-routes) |
 | `mitm` | `homebrew` | Which programs can reach the tailnet: `homebrew`, `off`, or `homebrew,sys-ftpd` (see below) |
 | `overlay_budget_kb` | `320` | Memory for tailnet sockets, shared by all apps (128–512). Raise it only if apps report "no buffer space". |
 | `ca_cert` | none | Extra CA certificate (DER) for a self-signed headscale |

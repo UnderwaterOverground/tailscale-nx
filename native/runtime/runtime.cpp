@@ -7,11 +7,13 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <ctime>
 #include <vector>
 
 #include "tsnx_app.h"
+#include "vsock.hpp"
 
 namespace tsnx {
 
@@ -92,6 +94,7 @@ std::unique_ptr<Runtime> Runtime::Start(RuntimeConfig cfg, std::string *error) {
         *error = "tsnx_engine_new failed (bad control URL?)";
         return nullptr;
     }
+    tsnx_engine_set_accept_routes(rt->engine_, c.accept_routes);
     Runtime *self = rt.get();
     rt->driver_ = tsnx_driver_new(
         rt->engine_,
@@ -101,6 +104,11 @@ std::unique_ptr<Runtime> Runtime::Start(RuntimeConfig cfg, std::string *error) {
                 uint8_t node[32];
                 tsnx_engine_node_key(r->engine_, node);
                 tsnx_state_set_node(r->cfg_.state_path.c_str(), node);
+            }
+            if (ev->kind == TSNX_EVENT_PEERS && r->cfg_.accept_routes) {
+                TsnxPrefix routes[VSock::MaxRoutes];
+                const size_t n = tsnx_engine_routes(r->engine_, routes, VSock::MaxRoutes);
+                VSock::SetRoutes(routes, std::min(n, VSock::MaxRoutes));
             }
             if (r->cfg_.on_event) r->cfg_.on_event(*ev);
         },

@@ -76,9 +76,11 @@ struct Peer {
     name: String,
     key: NodePublicKey,
     disco: Option<DiscoPublicKey>,
-    /// Addresses and allowed IPs: what this peer may source, and what we
-    /// route to it.
+    /// What this peer may source, and what we route to it: its addresses,
+    /// plus its subnet routes if we accept them.
     prefixes: Vec<Prefix>,
+    /// Subnet routes it serves (accepted or not).
+    routes: Vec<Prefix>,
     home_derp: Option<u32>,
     endpoints: Vec<SocketAddr>,
     wg: PeerId,
@@ -164,6 +166,8 @@ pub struct Engine {
     self_user: i64,
     self_tagged: bool,
     file_sharing: bool,
+    /// Use peers' subnet routes (like `tailscale up --accept-routes`).
+    accept_routes: bool,
 }
 
 /// How often buffers that grew for a burst are shrunk back.
@@ -217,6 +221,7 @@ impl Engine {
             self_user: 0,
             self_tagged: false,
             file_sharing: false,
+            accept_routes: false,
         })
     }
 
@@ -248,6 +253,31 @@ impl Engine {
             }
         }
         out.retain(|(_, n)| !n.is_empty());
+        out
+    }
+
+    /// Uses (or stops using) peers' subnet routes.
+    pub fn set_accept_routes(&mut self, on: bool) {
+        self.accept_routes = on;
+        for p in self.peers.values_mut() {
+            p.prefixes.retain(|pre| !p.routes.contains(pre));
+            if on {
+                p.prefixes.extend(p.routes.iter().copied());
+            }
+        }
+    }
+
+    /// Subnet routes in use (see [`Self::set_accept_routes`]) as (network,
+    /// prefix length), each once.
+    pub fn routes(&self) -> Vec<(IpAddr, u8)> {
+        let mut out = Vec::new();
+        if self.accept_routes {
+            for r in self.peers.values().flat_map(|p| p.routes.iter()) {
+                if !out.contains(&(r.addr, r.len)) {
+                    out.push((r.addr, r.len));
+                }
+            }
+        }
         out
     }
 
@@ -776,7 +806,11 @@ impl Engine {
     fn upsert_peer(&mut self, n: &netmap::Node) {
         let Some(key) = n.key() else { return };
         let disco_key = n.disco_key();
-        let prefixes = n.allowed_prefixes();
+        let routes = n.subnet_routes();
+        let mut prefixes = n.addresses();
+        if self.accept_routes {
+            prefixes.extend(routes.iter().copied());
+        }
         let home_derp = n.home_derp();
         let wg = match self.peers.get(&n.id) {
             Some(existing) => existing.wg,
@@ -809,6 +843,7 @@ impl Engine {
                 key,
                 disco: disco_key,
                 prefixes,
+                routes,
                 home_derp,
                 endpoints: n.endpoints(),
                 wg,

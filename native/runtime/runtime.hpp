@@ -34,6 +34,9 @@ struct RuntimeConfig {
     // Taildrop: save received files into this folder (empty = off).
     std::string taildrop_dir;
     uint16_t taildrop_port = 0;
+    // Use peers' subnet routes (the socket layer then sends them through
+    // the engine).
+    bool accept_routes = false;
     // Called on the engine thread with the lock held; must not call back in.
     std::function<void(const TsnxEvent &)> on_event;
 };

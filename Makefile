@@ -130,5 +130,11 @@ target/libtsnx_interpose.dylib: $(VSOCK_SRCS) $(VSOCK_C_SRCS) native/*/*.h* FORC
 	$(CXX) -std=c++17 -O1 -g -Wall -dynamiclib -o $@ $(VSOCK_INC) $(VSOCK_SRCS) target/tsnx_driver.o target/tsnx_app.o target/tsnx_dns.o target/tsnx_drop.o \
 		target/debug/libtsnx_ffi.a -framework CoreFoundation -framework Security
 
+# The socket layer's subnet-route check (macOS; links the interpose shim).
+.PHONY: routes-test
+routes-test: target/libtsnx_interpose.dylib
+	$(CXX) -std=c++17 -O1 -g -Wall $(VSOCK_INC) -o target/routes-test native/host/routes_test.cpp $<
+	target/routes-test
+
 target/vsock-test: native/interpose/vsock_test.c
 	$(CC) -O1 -g -Wall -o $@ $<

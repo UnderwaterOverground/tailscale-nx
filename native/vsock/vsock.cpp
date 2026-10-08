@@ -5,6 +5,7 @@
 #include <netinet/tcp.h>
 #include <sys/time.h>
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -84,15 +85,64 @@ Runtime::Clock::time_point DeadlineFrom(int timeout_ms) {
 
 }  // namespace
 
+namespace {
+
+std::mutex g_routes_mu;
+TsnxPrefix g_routes[VSock::MaxRoutes];
+size_t g_num_routes = 0;
+uint32_t g_local_ipv4 = 0;
+unsigned g_local_len = 32;
+
+// Whether the first `len` bits of a and b match.
+bool PrefixMatch(const uint8_t *a, const uint8_t *b, unsigned len) {
+    const unsigned bytes = len / 8, bits = len % 8;
+    if (std::memcmp(a, b, bytes) != 0) return false;
+    if (bits == 0) return true;
+    const uint8_t mask = static_cast<uint8_t>(0xff << (8 - bits));
+    return (a[bytes] & mask) == (b[bytes] & mask);
+}
+
+}  // namespace
+
+void VSock::SetRoutes(const TsnxPrefix *routes, size_t n) {
+    std::lock_guard<std::mutex> lock(g_routes_mu);
+    g_num_routes = std::min(n, MaxRoutes);
+    if (g_num_routes) std::memcpy(g_routes, routes, g_num_routes * sizeof *routes);
+}
+
+void VSock::SetLocalNet(uint32_t ip, unsigned len) {
+    std::lock_guard<std::mutex> lock(g_routes_mu);
+    g_local_ipv4 = ip;
+    g_local_len = std::min(len, 32u);
+}
+
 bool VSock::IsTailnet(const sockaddr *addr) {
     if (!addr) return false;
+    uint8_t ip[16];
+    int family;
     if (addr->sa_family == AF_INET) {
-        uint32_t ip = ntohl(reinterpret_cast<const sockaddr_in *>(addr)->sin_addr.s_addr);
-        return (ip & 0xffc00000u) == 0x64400000u;  // 100.64.0.0/10
-    }
-    if (addr->sa_family == AF_INET6) {
+        const uint32_t v4 = ntohl(reinterpret_cast<const sockaddr_in *>(addr)->sin_addr.s_addr);
+        if ((v4 & 0xffc00000u) == 0x64400000u) return true;  // 100.64.0.0/10
+        std::memcpy(ip, &reinterpret_cast<const sockaddr_in *>(addr)->sin_addr, 4);
+        family = 4;
+    } else if (addr->sa_family == AF_INET6) {
         static const uint8_t prefix[6] = {0xfd, 0x7a, 0x11, 0x5c, 0xa1, 0xe0};  // fd7a:115c:a1e0::/48
-        return std::memcmp(&reinterpret_cast<const sockaddr_in6 *>(addr)->sin6_addr, prefix, 6) == 0;
+        std::memcpy(ip, &reinterpret_cast<const sockaddr_in6 *>(addr)->sin6_addr, 16);
+        if (std::memcmp(ip, prefix, 6) == 0) return true;
+        family = 6;
+    } else {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_routes_mu);
+    uint8_t local[4];
+    const uint32_t local_be = htonl(g_local_ipv4);
+    std::memcpy(local, &local_be, 4);
+    for (size_t i = 0; i < g_num_routes; i++) {
+        const TsnxPrefix &r = g_routes[i];
+        if (r.family != family || r.len > (family == 4 ? 32 : 128) || !PrefixMatch(ip, r.ip, r.len)) continue;
+        // Overlapping networks share their first min(len) bits.
+        if (family == 4 && g_local_ipv4 && PrefixMatch(local, r.ip, std::min<unsigned>(r.len, g_local_len))) continue;
+        return true;
     }
     return false;
 }
