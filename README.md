@@ -87,6 +87,12 @@ homebrew to tailnet addresses. It doesn't change how games or Nintendo
 services connect. MagicDNS leaves Atmosphère's DNS blocking of Nintendo
 servers in place.
 
+**The console crashes (orange screen) when I wake it during a Moonlight
+stream.** That's a Moonlight-Switch bug
+([#306](https://github.com/XITRIX/Moonlight-Switch/issues/306)), and it
+happens with tailscale-nx turned off too. Until it's fixed, end the stream
+before putting the console to sleep.
+
 **Is my traffic private?** Like the official Tailscale clients, tailnet
 traffic is encrypted end to end with WireGuard. Tailscale's servers
 coordinate keys and relay encrypted packets when a direct connection isn't
