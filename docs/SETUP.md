@@ -25,7 +25,7 @@ Copy these to the SD card, merging folders:
 | Path | What |
 |---|---|
 | `atmosphere/contents/4200000000005453/` | The sysmodule. `flags/boot2.flag` makes it start at boot. |
-| `switch/.overlays/tailscale-nx.ovl` | The overlay: status, a pause switch and the login QR code |
+| `switch/.overlays/tailscale-nx.ovl` | The overlay: status, a pause switch, stop and start, and the login QR code |
 | `config/tailscale-nx/config.ini.example` | Settings template (optional; see below) |
 
 Then restart the console.
@@ -107,9 +107,20 @@ Until either happens, the Switch can't reach the tailnet.
   connected** in the overlay.
 - **Pause:** use the **Tailscale** switch in the overlay. While paused,
   tailnet connections fail at once and everything else works normally.
+- **Stop and start:** **Stop tailscale-nx** in the overlay ends the
+  sysmodule and frees its memory, until the next boot or until you press
+  **Start tailscale-nx**. Its boot setting doesn't change.
+  - Close homebrew apps first. Stop is refused while one has sockets through
+    tailscale-nx, because closing them would break the app. It's also
+    refused for a moment around sleep and wake.
+  - With `mitm=homebrew,sys-ftpd`, stopping restarts sys-ftpd, which drops
+    any FTP connection.
+  - Start works whether or not the boot setting is on, but not while
+    `config/tailscale-nx/disabled` exists.
 - **Turn it off completely:** in the **Sysmodules** overlay
-  (ovl-sysmodules), turn off tailscale-nx's boot setting and restart. It can't be stopped while it
-  runs, because Atmosphère would freeze if its socket hook disappeared.
+  (ovl-sysmodules), turn off tailscale-nx's boot setting, then use **Stop**
+  or restart. The Sysmodules overlay can't stop it itself: Atmosphère would
+  freeze if its socket hook disappeared without being removed first.
 
 ## Access rules
 
@@ -171,8 +182,9 @@ more of it, up to the `overlay_budget_kb` limit.
     exists.
   - If `config/tailscale-nx/crashed` exists, tailscale-nx turned itself off.
     It does this after 3 boots in a row that ended within 3 minutes, or 2
-    sleeps the console never woke from. The file says which. Delete it to try
-    again.
+    sleeps the console never woke from. The file says which. **Turn back on**
+    in the overlay deletes it and starts tailscale-nx again.
+  - If `config/tailscale-nx/disabled` exists, delete it.
 - **What happened?**
   - The log is in `config/tailscale-nx/sysmodule.log`, and the previous
     boot's log is in `sysmodule.log.1`.

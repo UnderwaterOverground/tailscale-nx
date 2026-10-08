@@ -31,4 +31,8 @@ namespace ams::status {
     void SetPaused(bool paused);
     bool IsPaused();
 
+    // Stopped from the overlay: TSNX_CTL_STOPPING from now on, and no login
+    // prompt left behind for a process that is going away.
+    void SetStopping();
+
 }

@@ -205,6 +205,7 @@ void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick) {
             suspended_flag_ = true;
             cv_.notify_all();
             cv_.wait(lock, [&] { return suspend_reasons_ == 0 || stop_; });
+            if (stop_) break;  // stopping: keep everything closed
             // Without a wake pair the loop still runs, just with up to a
             // second of latency for new overlay sockets.
             if (on_resume_) on_resume_();

@@ -16,6 +16,8 @@
 //   config/tailscale-nx/crashed      written after 3 boots in a row that ended
 //                                    within 3 minutes, or 2 sleeps that never woke;
 //                                    keeps it off (delete to retry)
+//   config/tailscale-nx/start_requested  written by the overlay just before it
+//                                    starts us (its system tick): not a boot start
 //   config/tailscale-nx/sysmodule.log (+ .1 from the previous boot)
 #include <stratosphere.hpp>
 
@@ -28,6 +30,7 @@
 #include <cerrno>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 extern "C" {
@@ -61,6 +64,9 @@ namespace ams {
         constexpr const char StartingPath[] = "sdmc:/config/tailscale-nx/starting";
         constexpr const char SleepingPath[] = "sdmc:/config/tailscale-nx/sleeping";
         constexpr const char SleepFailuresPath[] = "sdmc:/config/tailscale-nx/sleep_failures";
+        constexpr const char StartRequestedPath[] = "sdmc:/config/tailscale-nx/start_requested";
+        // How old the overlay's start request may be (pm launches at once).
+        constexpr u64 StartRequestFreshNs = 30'000'000'000ull;
         // A boot that doesn't last HealthyAfterNs counts against us (the
         // console itself can go down: a failed sleep made omm abort and
         // reboot it every ~2.5 minutes). Only boot-time starts count; a
@@ -488,6 +494,15 @@ namespace ams {
         constinit ::tsnx::Runtime *g_power_runtime = nullptr;
         alignas(os::ThreadStackAlignment) constinit u8 g_power_thread_stack[0x2000];  // measured: ~1 KB
         constinit os::ThreadType g_power_thread;
+        constinit bool g_power_running = false;  // registered with psc, thread started
+
+        // A stop from the overlay (StopForOverlay) asks the power thread to
+        // leave psc, which it does only between transitions. Asked -> Taken
+        // (the thread is deciding; can't be withdrawn) -> Done or Refused;
+        // the asker may withdraw Asked -> Idle.
+        enum PowerStop : int { PowerStop_Idle, PowerStop_Asked, PowerStop_Taken, PowerStop_Done, PowerStop_Refused };
+        constinit std::atomic<int> g_power_stop = PowerStop_Idle;
+        constinit os::EventType g_power_stop_event = {};
 
         // Every step is acknowledged without waiting on the network: by the
         // time "sleep ready" arrives the socket service may already be asleep,
@@ -502,12 +517,11 @@ namespace ams {
             // (the system waits on every module, so this is our share).
             u64 wake_held_ns = 0;
             bool waking = false;
-            for (;;) {
-                g_pm_module.GetEventPointer()->Wait();
+            auto handle_request = [&] {
                 const u64 asked = armTicksToNs(armGetSystemTick());
                 psc::PmState state;
                 psc::PmFlagSet flags;
-                if (R_FAILED(g_pm_module.GetRequest(std::addressof(state), std::addressof(flags)))) continue;
+                if (R_FAILED(g_pm_module.GetRequest(std::addressof(state), std::addressof(flags)))) return;
                 if (!suspended && last == psc::PmState_FullAwake && state != psc::PmState_FullAwake) {
                     // Every socket must be closed before we acknowledge: with
                     // ours open, the transition fails and omm aborts (2165-0001;
@@ -551,28 +565,82 @@ namespace ams {
                     waking = false;
                 }
                 last = state;
+            };
+            for (;;) {
+                os::WaitAny(g_pm_module.GetEventPointer()->GetBase(), std::addressof(g_power_stop_event));
+                if (g_pm_module.GetEventPointer()->TryWait()) handle_request();
+                if (!os::TryWaitEvent(std::addressof(g_power_stop_event))) continue;
+                int expected = PowerStop_Asked;
+                if (!g_power_stop.compare_exchange_strong(expected, PowerStop_Taken)) continue;  // withdrawn
+                // Only fully awake with no request waiting; one that just
+                // arrived is handled first, and the stop refused.
+                if (g_pm_module.GetEventPointer()->TryWait()) {
+                    handle_request();
+                } else if (!suspended && last == psc::PmState_FullAwake) {
+                    if (const Result rc = g_pm_module.Finalize(); R_SUCCEEDED(rc)) {
+                        Log("power: left psc (stopping)");
+                        g_power_stop = PowerStop_Done;
+                        return;
+                    } else {
+                        Log("power: leaving psc failed: 0x%x", rc.GetValue());
+                    }
+                }
+                g_power_stop = PowerStop_Refused;
             }
         }
 
-        void StartPowerHandling(::tsnx::Runtime &rt) {
+        // Without psc, sleep with our sockets open makes omm abort (the
+        // console restarts): false means don't run at all.
+        bool StartPowerHandling(::tsnx::Runtime &rt) {
             g_power_runtime = std::addressof(rt);
             if (R_FAILED(::pscmInitialize())) {
-                Log("power: psc unavailable; sleep may fail while running");
-                return;
+                Log("power: psc unavailable; not starting (sleep would fail)");
+                return false;
             }
             if (const Result rc = g_pm_module.Initialize(TsnxPmModuleId, PmDependencies, util::size(PmDependencies), os::EventClearMode_AutoClear); R_FAILED(rc)) {
-                Log("power: psc module registration failed: 0x%x", rc.GetValue());
-                return;
+                Log("power: psc module registration failed: 0x%x; not starting (sleep would fail)", rc.GetValue());
+                return false;
             }
+            os::InitializeEvent(std::addressof(g_power_stop_event), false, os::EventClearMode_AutoClear);
             stack_watch::Paint(g_power_thread_stack, sizeof g_power_thread_stack);
             if (R_FAILED(os::CreateThread(std::addressof(g_power_thread), PowerThread, nullptr, g_power_thread_stack, sizeof g_power_thread_stack,
                                           os::GetThreadCurrentPriority(os::GetCurrentThread())))) {
-                Log("power: cannot create thread");
-                return;
+                Log("power: cannot create thread; not starting");
+                static_cast<void>(g_pm_module.Finalize());
+                return false;
             }
             os::SetThreadNamePointer(std::addressof(g_power_thread), "tsnx.Power");
             stack_watch::Add("power", std::addressof(g_power_thread));
             os::StartThread(std::addressof(g_power_thread));
+            g_power_running = true;
+            return true;
+        }
+
+        // Leaves psc for a stop, if no power transition is under way. Once
+        // this returns true the system no longer waits for us at sleep, so
+        // our sockets must already be closed.
+        bool StopPowerHandling() {
+            if (!g_power_running) return true;
+            g_power_stop = PowerStop_Asked;
+            os::SignalEvent(std::addressof(g_power_stop_event));
+            const u64 deadline = armTicksToNs(armGetSystemTick()) + 3'000'000'000ull;
+            for (;;) {
+                const int st = g_power_stop.load();
+                if (st == PowerStop_Done || st == PowerStop_Refused) break;
+                if (st == PowerStop_Asked && armTicksToNs(armGetSystemTick()) > deadline) {
+                    int expected = PowerStop_Asked;
+                    if (g_power_stop.compare_exchange_strong(expected, PowerStop_Idle)) return false;
+                }
+                // Taken: the thread is deciding (bounded by one request).
+                os::SleepThread(TimeSpan::FromMilliSeconds(10));
+            }
+            const bool done = g_power_stop.load() == PowerStop_Done;
+            if (done) {
+                g_power_running = false;
+            } else {
+                g_power_stop = PowerStop_Idle;
+            }
+            return done;
         }
 
     }
@@ -600,6 +668,22 @@ namespace ams {
         AMS_UNUSED(rc);
         ::svcExitProcess();
         __builtin_unreachable();
+    }
+
+    // The overlay's Start writes its system tick to StartRequestedPath just
+    // before launching us. A fresh one means this isn't a boot-time start
+    // (the tick restarts at boot, so a leftover from an earlier boot is
+    // never fresh). Always consumed.
+    bool StartedFromOverlay() {
+        char buf[32] = {};
+        const bool have = ReadWholeFile(StartRequestedPath, buf, sizeof buf) > 0;
+        static_cast<void>(fs::DeleteFile(StartRequestedPath));
+        if (!have) return false;
+        const u64 asked = std::strtoull(buf, nullptr, 10);
+        const u64 now = armGetSystemTick();
+        if (asked == 0 || asked > now || armTicksToNs(now - asked) > StartRequestFreshNs) return false;
+        Log("started from the overlay");
+        return true;
     }
 
     // Crash-loop guard: stays off (and writes `crashed`) after repeated
@@ -631,11 +715,87 @@ namespace ams {
             WriteWholeFile(SleepFailuresPath, buf, util::SNPrintf(buf, sizeof buf, "%d", failures));
         }
 
+        if (StartedFromOverlay()) return true;
         if (armTicksToNs(armGetSystemTick()) > BootStartWithinNs) return true;  // started by hand
         const int count = ReadWholeFile(StartingPath, buf, sizeof buf) > 0 ? std::atoi(buf) : 0;
         if (count >= MaxUnhealthyStarts) return give_up("3 boots in a row crashed within 3 minutes");
         WriteWholeFile(StartingPath, buf, util::SNPrintf(buf, sizeof buf, "%d", count + 1));
         return true;
+    }
+
+    namespace {
+
+        constinit ::tsnx::Runtime *g_runtime = nullptr;
+        constinit std::atomic<bool> g_stopping = false;  // committed: exit once the engine loop ends
+        constinit bool g_stop_failed = false;  // committed but can't exit: idle until restart
+
+        // tsnx:ctl Stop, on the ctl thread. Exiting is safe only with no
+        // client session through our MITM, the MITM uninstalled from sm
+        // (sm aborts on queries to a dead owner), our psc module gone (the
+        // system would wait on it at sleep) and our sockets closed before
+        // that. Each check that can refuse runs while it can still be undone.
+        u32 StopForOverlay(u32 *detail) {
+            *detail = 0;
+            if (g_stopping) return TSNX_CTL_STOP_OK;
+            if (g_stop_failed) return TSNX_CTL_STOP_FAILED;
+            if (!g_runtime) return TSNX_CTL_STOP_BUSY;
+            Log("stop: requested from the overlay");
+
+            // 1. No homebrew sessions; new ones bypass us from now on.
+            switch (bsd_mitm::PrepareStop(detail)) {
+                case bsd_mitm::StopCheck::Ok:
+                    break;
+                case bsd_mitm::StopCheck::Homebrew:
+                    Log("stop: refused, homebrew has %u session(s) through us", *detail);
+                    return TSNX_CTL_STOP_HOMEBREW;
+                case bsd_mitm::StopCheck::Busy:
+                    return TSNX_CTL_STOP_BUSY;
+            }
+            // 2. Close the engine's sockets (and the UDP log's).
+            if (!g_runtime->Suspend(::tsnx::Runtime::kStopping, std::chrono::milliseconds(3000))) {
+                Log("stop: refused, the engine didn't close its sockets in time");
+                g_runtime->Resume(::tsnx::Runtime::kStopping);
+                bsd_mitm::CancelStop();
+                return TSNX_CTL_STOP_BUSY;
+            }
+            // 3. Leave psc, unless a sleep or wake is under way.
+            if (!StopPowerHandling()) {
+                Log("stop: refused, a power state change is under way");
+                g_runtime->Resume(::tsnx::Runtime::kStopping);
+                bsd_mitm::CancelStop();
+                return TSNX_CTL_STOP_BUSY;
+            }
+
+            // Committed. On failure from here on the process stays, idle:
+            // engine suspended, out of psc, new sessions not MITM'd.
+            status::SetStopping();
+            // A deliberate stop isn't a failed boot for the crash guard.
+            static_cast<void>(fs::DeleteFile(StartingPath));
+            if (!bsd_mitm::UninstallForStop()) {
+                Log("stop: couldn't detach from the system cleanly; staying idle until the console restarts");
+                g_stop_failed = true;
+                return TSNX_CTL_STOP_FAILED;
+            }
+            Log("stop: exiting (it starts again at boot, or from the overlay)");
+            g_stopping = true;
+            g_runtime->Stop();  // the main thread exits once the loop returns
+            return TSNX_CTL_STOP_OK;
+        }
+
+        // After StopForOverlay: nothing of ours is registered anywhere, and
+        // our threads are idle. End the process without running global
+        // destructors under those threads.
+        void NORETURN ExitAfterStop() {
+            os::SleepThread(TimeSpan::FromMilliSeconds(250));  // let the ctl reply go out
+            {
+                std::scoped_lock lk(g_log_mutex);
+                if (g_log_open) fs::CloseFile(g_log_file);
+                g_log_open = false;
+            }
+            ::svcExitProcess();
+            __builtin_unreachable();
+        }
+
     }
 
     void Main() {
@@ -759,7 +919,8 @@ namespace ams {
             g_tailnet_log_hold_until_ns = armTicksToNs(armGetSystemTick()) + 10'000'000'000ull;
             OpenUdpLogSocket();
         });
-        StartPowerHandling(*rt);
+        if (!StartPowerHandling(*rt)) return;
+        g_runtime = rt.get();
         // mitm=homebrew (default), off, or homebrew,sys-ftpd.
         const bool mitm = bsd_mitm::Start(*rt, std::strcmp(cfg.mitm, "off") == 0 ? bsd_mitm::Scope::Off : bsd_mitm::Scope::Homebrew,
                                           std::strstr(cfg.mitm, "sys-ftpd") != nullptr);
@@ -768,7 +929,7 @@ namespace ams {
         // the engine loop's first round), then its control service.
         status::Initialize(*rt, (mitm ? TSNX_CTL_FLAG_MITM : 0) | (magicdns ? TSNX_CTL_FLAG_MAGICDNS : 0),
                            std::strcmp(cfg.connect_notice, "off") != 0);
-        ctl::Start();
+        ctl::Start(StopForOverlay);
 
         // Engine loop on this thread; housekeeping between rounds. Re-detect
         // our address after Wi-Fi changes (roaming, sleep/wake).
@@ -815,6 +976,11 @@ namespace ams {
                 }
             }
         });
+        // Only a stop from the overlay ends the loop.
+        if (g_stopping) ExitAfterStop();
+        Log("engine loop ended unexpectedly; exiting");
+        bsd_mitm::UninstallForExit();
+        ::svcExitProcess();
     }
 
 }

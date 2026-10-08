@@ -4,6 +4,8 @@
 // forwarded to the real bsd:u untouched.
 #pragma once
 
+#include <stratosphere.hpp>
+
 namespace tsnx {
     class Runtime;
 }
@@ -29,7 +31,30 @@ namespace ams::bsd_mitm {
     // exits: sm asks the MITM owner about every new bsd:u session and aborts
     // (freezing the console) if the owner is gone. For the same reason the
     // overlay must not kill us (toolbox.json: requires_reboot). Covers bsd:s
-    // too when sys-ftpd is served.
+    // too when sys-ftpd is served. Best effort, for the crash handler.
     void UninstallForExit();
+
+    // ---- a deliberate stop (tsnx:ctl Stop) ----------------------------------
+
+    enum class StopCheck {
+        Ok,        // no client sessions; new ones bypass us until CancelStop
+        Homebrew,  // homebrew sessions are open (closing them would break the app)
+        Busy,      // a session sm handed us isn't acknowledged yet
+    };
+
+    // Refuses if homebrew has sessions through us. Otherwise answers "don't
+    // MITM" to every new session from now on and waits (bounded) until every
+    // session sm already sent us has been acknowledged: uninstalling with
+    // one pending would leave sm deferring that service's requests, and our
+    // acknowledgement would then abort. sys-ftpd's sessions don't count:
+    // UninstallForStop restarts it. Undo with CancelStop.
+    StopCheck PrepareStop(u32 *out_homebrew_sessions);
+    void CancelStop();
+
+    // After PrepareStop: uninstalls (checking every result), restarts
+    // sys-ftpd if we served it, and waits (bounded) for every session
+    // through us to close. True only if the process may now exit. On false
+    // it must keep running (new sessions keep bypassing us).
+    bool UninstallForStop();
 
 }

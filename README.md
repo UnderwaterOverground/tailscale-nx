@@ -24,7 +24,7 @@ without opening ports on your router.
 - **Direct connections** between devices where possible, with Tailscale's
   relays (DERP) as a fallback, just like the official clients.
 - **Overlay** (Ultrahand): status, the Switch's tailnet IP, a pause switch,
-  and a QR code for logging in.
+  stop and start, and a QR code for logging in.
 - **Easy login:** scan a QR code, or put an auth key in a config file. Key
   expiry is handled.
 - **Respects your tailnet's access rules (ACLs)** for incoming connections.
@@ -75,8 +75,9 @@ and use that instead, which is fine. Away from home, it uses the tailnet.
 - **No Taildrop or Tailscale SSH.**
 - The Switch connects to the internet over **IPv4 only** (tailnet IPv6
   addresses work).
-- tailscale-nx can't be stopped while it runs. Turning it off (in the
-  Sysmodules overlay) takes a restart.
+- To stop tailscale-nx while it runs, use **Stop** in its own overlay
+  (close homebrew apps first). The Sysmodules overlay can't stop it: turning
+  it off there takes a restart.
 - Tested on one Mariko Switch. Reports from other models and firmware
   versions are welcome.
 
