@@ -71,9 +71,10 @@ and use that instead, which is fine. Away from home, it uses the tailnet.
 
 ## Known limitations
 
-- **Homebrew only**, and only apps launched from hbmenu. Games, Nintendo's
-  apps and homebrew started from a home-screen forwarder don't use the
-  tailnet.
+- **Homebrew only**: apps launched from hbmenu, and home-screen forwarders
+  only if their title IDs are listed in `mitm_titles` (see the
+  [setup guide](docs/SETUP.md#home-screen-forwarders)). Games and Nintendo's
+  apps don't use the tailnet.
 - **No exit nodes:** only tailnet addresses and your tailnet's subnet routes
   go through Tailscale.
 - **No Tailscale SSH**, and Taildrop only receives (the Switch can't send

@@ -79,6 +79,16 @@ namespace ams::bsd_mitm {
         constexpr sm::ServiceName BsdUName = sm::ServiceName::Encode("bsd:u");
         constexpr sm::ServiceName BsdSName = sm::ServiceName::Encode("bsd:s");
         constexpr u64 SysFtpdProgramId = 0x420000000000000E;
+        // mitm_titles (forwarders), served like homebrew. Filled by Start()
+        // before the MITM is registered and only read after, so the server
+        // threads need no lock.
+        constexpr size_t MaxTitles = 16;
+        constinit u64 g_titles[MaxTitles] = {};
+        constinit size_t g_num_titles = 0;
+
+        bool IsListedTitle(u64 program_id) {
+            return std::find(g_titles, g_titles + g_num_titles, program_id) != g_titles + g_num_titles;
+        }
 
         // bsd:u speaks Linux errno numbers and O_NONBLOCK = 0x800 (libnx
         // translates both for its callers); everything else matches libnx's
@@ -353,7 +363,7 @@ namespace ams::bsd_mitm {
 
             static bool ShouldMitm(const sm::MitmProcessInfo &c) {
                 // sys-ftpd builds whose libnx prefers bsd:u come through here.
-                return (g_scope == Scope::Homebrew && c.override_status.IsHbl()) ||
+                return (g_scope == Scope::Homebrew && (c.override_status.IsHbl() || IsListedTitle(c.program_id.value))) ||
                        (g_sys_ftpd && c.program_id.value == SysFtpdProgramId);
             }
 
@@ -619,7 +629,7 @@ namespace ams::bsd_mitm {
         // pointer buffer fits (a smaller one would abort on every session).
         constexpr size_t PointerBufferSize = 0x1000;
         // A homebrew app opens ~4 sessions (main + clones + monitor), and
-        // homebrew runs one app at a time.
+        // hbmenu runs one app at a time (plus a listed forwarder, at most).
         constexpr size_t MaxSessions = 16;
 
         struct ServerOptions {
@@ -769,11 +779,47 @@ namespace ams::bsd_mitm {
             pmshellExit();
         }
 
+        int HexNibble(char ch) {
+            if (ch >= '0' && ch <= '9') return ch - '0';
+            if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+            if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+            return -1;
+        }
+
+        // mitm_titles into g_titles: 16 hex digits each, 0x optional.
+        void ParseTitles(const char *text) {
+            for (const char *p = text; *p;) {
+                const size_t len = std::strcspn(p, ", \t");
+                if (len == 0) {
+                    p++;
+                    continue;
+                }
+                const bool prefixed = len > 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X');
+                const char *digits = prefixed ? p + 2 : p;
+                const size_t n = prefixed ? len - 2 : len;
+                u64 id = 0;
+                bool ok = n == 16;
+                for (size_t i = 0; ok && i < n; i++) {
+                    const int v = HexNibble(digits[i]);
+                    if (v < 0) ok = false;
+                    else id = (id << 4) | static_cast<u64>(v);
+                }
+                if (!ok || id == 0) {
+                    Log("bsd mitm: mitm_titles: ignoring \"%.*s\" (not a 16-digit hex program ID)", static_cast<int>(len), p);
+                } else if (g_num_titles == MaxTitles) {
+                    Log("bsd mitm: mitm_titles: more than %zu IDs; ignoring %016lx", MaxTitles, id);
+                } else if (!IsListedTitle(id)) {
+                    g_titles[g_num_titles++] = id;
+                }
+                p += len;
+            }
+        }
+
     }
 
-    bool Start(::tsnx::Runtime &rt, Scope scope, bool sys_ftpd) {
+    bool Start(::tsnx::Runtime &rt, Scope scope, bool sys_ftpd, const char *titles) {
         if (scope == Scope::Off) {
-            Log("bsd mitm: off (mitm=off in config.ini)");
+            Log("bsd mitm: off (mitm=off in config.ini)%s", titles[0] ? "; mitm_titles ignored" : "");
             return false;
         }
 
@@ -793,6 +839,7 @@ namespace ams::bsd_mitm {
         g_runtime = std::addressof(rt);
         g_scope = scope;
         g_sys_ftpd = sys_ftpd;
+        ParseTitles(titles);
         if (const Result rc = g_server_manager.RegisterMitmServer<BsdMitmService>(PortIndex_BsdU, BsdUName); R_FAILED(rc)) {
             Log("bsd mitm: registering failed: 0x%x", rc.GetValue());
             return false;
@@ -812,6 +859,12 @@ namespace ams::bsd_mitm {
             os::StartThread(g_threads + i);
         }
         Log("bsd mitm: active for homebrew (real pointer buffer 0x%zx, %zu threads)", real_pointer_buffer, NumThreads);
+        if (g_num_titles > 0) {
+            char list[MaxTitles * 18];
+            int n = 0;
+            for (size_t i = 0; i < g_num_titles; i++) n += util::SNPrintf(list + n, sizeof list - n, "%s%016lx", i ? ", " : "", g_titles[i]);
+            Log("bsd mitm: active for %zu title(s) from mitm_titles: %s", g_num_titles, list);
+        }
         if (sys_ftpd && StartSystemMitm(priority)) {
             Log("bsd mitm: active for sys-ftpd");
             RestartSysFtpd();

@@ -8,6 +8,7 @@
 //   config/tailscale-nx/config.ini   shared with the app (control_url, auth_key,
 //                                    hostname, ca_cert, log_udp=<ip>:<port>,
 //                                    mitm=homebrew|homebrew,sys-ftpd|off,
+//                                    mitm_titles=<program IDs>,
 //                                    magicdns=on|off,
 //                                    overlay_budget_kb=<128..512>,
 //                                    connect_notice=on|off, taildrop=on|off,
@@ -237,6 +238,7 @@ namespace ams {
             char ca_cert[256] = {};
             char log_udp[64] = {};
             char mitm[32] = "homebrew";  // "homebrew,sys-ftpd" or "off"
+            char mitm_titles[384] = {};  // forwarders' program IDs, served like homebrew
             char magicdns[8] = "on";      // tailnet names in Atmosphere's hosts file, or "off"
             char overlay_budget_kb[8] = {};  // tailnet socket buffers; default 320
             char connect_notice[8] = "on";   // toast with our address when first connected
@@ -263,6 +265,7 @@ namespace ams {
                 set("ca_cert", c.ca_cert, sizeof c.ca_cert);
                 set("log_udp", c.log_udp, sizeof c.log_udp);
                 set("mitm", c.mitm, sizeof c.mitm);
+                set("mitm_titles", c.mitm_titles, sizeof c.mitm_titles);
                 set("magicdns", c.magicdns, sizeof c.magicdns);
                 set("overlay_budget_kb", c.overlay_budget_kb, sizeof c.overlay_budget_kb);
                 set("connect_notice", c.connect_notice, sizeof c.connect_notice);
@@ -793,9 +796,10 @@ namespace ams {
             OpenUdpLogSocket();
         });
         StartPowerHandling(*rt);
-        // mitm=homebrew (default), off, or homebrew,sys-ftpd.
+        // mitm=homebrew (default), off, or homebrew,sys-ftpd; mitm_titles
+        // adds forwarders to the homebrew scope.
         const bool mitm = bsd_mitm::Start(*rt, std::strcmp(cfg.mitm, "off") == 0 ? bsd_mitm::Scope::Off : bsd_mitm::Scope::Homebrew,
-                                          std::strstr(cfg.mitm, "sys-ftpd") != nullptr);
+                                          std::strstr(cfg.mitm, "sys-ftpd") != nullptr, cfg.mitm_titles);
 
         // Status for the overlay (and the user's pause switch, applied before
         // the engine loop's first round), then its control service.
