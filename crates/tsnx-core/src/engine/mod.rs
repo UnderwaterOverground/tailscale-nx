@@ -347,6 +347,22 @@ impl Engine {
         self.pump();
     }
 
+    /// The underlying network came back (e.g. Wi-Fi after a wake): control
+    /// and the home DERP connection retry now if they're waiting out a
+    /// backoff that failures while offline grew. Connections that are up or
+    /// being set up are left alone, so repeated calls are harmless.
+    pub fn network_up(&mut self, now: Instant) {
+        self.now = now;
+        self.control.retry_now(now);
+        if self.derp_retry_at.take().is_some() {
+            self.derp_backoff.reset();
+            if let Some(home) = self.home_derp {
+                self.ensure_derp(home);
+            }
+        }
+        self.pump();
+    }
+
     pub fn handle_connected(&mut self, id: ConnId, now: Instant) {
         self.now = now;
         match self.owners.get(&id) {
@@ -883,4 +899,65 @@ fn key_bytes(k: &NodePublicKey) -> [u8; 32] {
 
 fn disco_bytes(k: &DiscoPublicKey) -> [u8; 32] {
     k.as_bytes().try_into().expect("32-byte key")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HOME: u32 = 1;
+
+    fn engine(now: Instant) -> Engine {
+        let cfg = EngineConfig {
+            control: ControlConfig { url: "http://control.test".into(), auth_key: None, hostname: "test".into(), extra_roots: Vec::new() },
+            machine_private: [1; 32],
+            node_private: [2; 32],
+            disco_private: [3; 32],
+        };
+        let mut e = Engine::new(cfg, now, Duration::from_secs(1_700_000_000)).unwrap();
+        let node = DerpNode { hostname: "derp.test".into(), connect_host: "derp.test".into(), port: 443, stun: None };
+        e.derp_nodes.insert(HOME, node);
+        e.home_derp = Some(HOME);
+        e
+    }
+
+    /// Connections opened to the home DERP region since the last call.
+    fn derp_connects(e: &mut Engine) -> usize {
+        let io: Vec<Io> = core::iter::from_fn(|| e.poll_io()).collect();
+        io.iter().filter(|io| matches!(io, Io::Connect { id, .. } if matches!(e.owners.get(id), Some(Owner::Derp(HOME))))).count()
+    }
+
+    #[test]
+    fn network_up_retries_derp_now() {
+        let now = Instant::from_nanos(1_000_000_000);
+        let mut e = engine(now);
+        // Home DERP lost while offline, its backoff grown to 16 s.
+        for _ in 0..4 {
+            e.derp_backoff.next_delay();
+        }
+        e.derp_retry_at = Some(now + Duration::from_secs(16));
+        derp_connects(&mut e);
+
+        e.network_up(now);
+        assert_eq!(derp_connects(&mut e), 1);
+        assert_eq!(e.derp_retry_at, None);
+        assert_eq!(e.derp_backoff.clone().next_delay(), Duration::from_secs(1));
+        // Repeated calls don't open more connections.
+        e.network_up(now);
+        assert_eq!(derp_connects(&mut e), 0);
+    }
+
+    #[test]
+    fn network_up_leaves_a_derp_connection_alone() {
+        let now = Instant::from_nanos(1_000_000_000);
+        let mut e = engine(now);
+        e.ensure_derp(HOME);
+        e.derp_backoff.next_delay();
+        derp_connects(&mut e);
+
+        e.network_up(now);
+        assert_eq!(derp_connects(&mut e), 0);
+        assert_eq!(e.derps.len(), 1);
+        assert_eq!(e.derp_backoff.clone().next_delay(), Duration::from_secs(2));
+    }
 }

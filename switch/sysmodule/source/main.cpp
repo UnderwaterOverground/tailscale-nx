@@ -761,9 +761,11 @@ namespace ams {
 
         // Homebrew sockets to tailnet addresses go through the engine.
         // The log socket goes down and up with the engine's own (sleep).
-        rt->SetSuspendHooks([] { CloseUdpLogSocket(); }, [] {
+        // Coming back counts as having been offline (see the loop below).
+        rt->SetSuspendHooks([] { CloseUdpLogSocket(); }, [&ip] {
             g_tailnet_log_hold_until_ns = armTicksToNs(armGetSystemTick()) + 10'000'000'000ull;
             OpenUdpLogSocket();
+            ip = 0;
         });
         StartPowerHandling(*rt);
         // mitm=homebrew (default), off, or homebrew,sys-ftpd.
@@ -778,8 +780,10 @@ namespace ams {
 
         // Engine loop on this thread; housekeeping between rounds. Re-detect
         // our address after Wi-Fi changes (roaming, sleep/wake): every 5 s,
-        // or 250 ms while offline so our LAN endpoint is back soon after
-        // Wi-Fi is (a wake usually finds it still down).
+        // or 250 ms while offline (a wake usually finds Wi-Fi still down).
+        // Back online, control and DERP retry at once rather than after the
+        // backoff their failures while offline grew, and the LAN endpoint is
+        // refreshed.
         u64 last_check = armTicksToNs(armGetSystemTick());
         u64 last_heap_log = 0;
         const u64 started = armTicksToNs(armGetSystemTick());
@@ -818,6 +822,7 @@ namespace ams {
                 const u32 cur = NetworkUp() ? CurrentIp() : 0;
                 if (cur != ip) {
                     Log("local address changed: %s", cur ? inet_ntoa(in_addr{cur}) : "(offline)");
+                    if (cur && !ip) tsnx_engine_network_up(engine, tsnx_driver_now_ns());
                     ip = cur;
                     if (cur) tsnx_driver_refresh_endpoints(d);
                 }

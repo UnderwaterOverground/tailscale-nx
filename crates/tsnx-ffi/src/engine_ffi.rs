@@ -274,6 +274,16 @@ pub unsafe extern "C" fn tsnx_engine_timeout(e: *mut TsnxEngine, now_ns: u64) {
     e.engine.handle_timeout(e.now);
 }
 
+/// The network came back (offline -> online, e.g. Wi-Fi after a wake):
+/// control and DERP retry now instead of waiting out their backoff. Leaves
+/// connections that are up alone.
+#[no_mangle]
+pub unsafe extern "C" fn tsnx_engine_network_up(e: *mut TsnxEngine, now_ns: u64) {
+    let e = &mut *e;
+    e.now = Instant::from_nanos(now_ns);
+    e.engine.network_up(e.now);
+}
+
 /// Monotonic time (ns) by which `tsnx_engine_timeout` should be called.
 #[no_mangle]
 pub unsafe extern "C" fn tsnx_engine_next_deadline(e: *mut TsnxEngine) -> u64 {
