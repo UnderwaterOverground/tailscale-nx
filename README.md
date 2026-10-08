@@ -27,6 +27,8 @@ without opening ports on your router.
   and a QR code for logging in.
 - **Easy login:** scan a QR code, or put an auth key in a config file. Key
   expiry is handled.
+- **Taildrop:** send files to the Switch from your phone or computer. They
+  land in the SD card's `Taildrop` folder.
 - **Respects your tailnet's access rules (ACLs)** for incoming connections.
 - **Optional:** reach the Switch's [sys-ftpd](https://github.com/cathery/sys-ftpd)
   over the tailnet.
@@ -72,7 +74,8 @@ and use that instead, which is fine. Away from home, it uses the tailnet.
   tailnet.
 - **No subnet routes or exit nodes:** only tailnet addresses
   (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) go through Tailscale.
-- **No Taildrop or Tailscale SSH.**
+- **No Tailscale SSH**, and Taildrop only receives (the Switch can't send
+  files).
 - The Switch connects to the internet over **IPv4 only** (tailnet IPv6
   addresses work).
 - tailscale-nx can't be stopped while it runs. Turning it off (in the

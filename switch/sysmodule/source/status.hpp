@@ -27,6 +27,9 @@ namespace ams::status {
     size_t GetLoginUrl(char *out, size_t cap);
     size_t GetLastError(char *out, size_t cap);
 
+    // A Taildrop transfer ended: a short toast either way.
+    void AnnounceFile(bool saved, const char *name, u64 bytes, const char *from, const char *why);
+
     // Pauses or resumes Tailscale (persisted). Not from the engine thread.
     void SetPaused(bool paused);
     bool IsPaused();

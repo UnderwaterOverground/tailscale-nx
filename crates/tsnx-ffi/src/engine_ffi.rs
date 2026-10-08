@@ -83,6 +83,8 @@ pub struct TsnxEngine {
     io_host: Vec<u8>,
     io_data: Vec<u8>,
     event_text: Vec<u8>,
+    drop_name: Vec<u8>,
+    drop_text: Vec<u8>,
 }
 
 unsafe fn cstr<'a>(p: *const c_char) -> Option<&'a str> {
@@ -135,6 +137,8 @@ pub unsafe extern "C" fn tsnx_engine_new(cfg: *const TsnxConfig, now_ns: u64, un
             io_host: Vec::new(),
             io_data: Vec::new(),
             event_text: Vec::new(),
+            drop_name: Vec::new(),
+            drop_text: Vec::new(),
         })),
         Err(_) => core::ptr::null_mut(),
     }
@@ -494,4 +498,95 @@ pub unsafe extern "C" fn tsnx_net_peer_addr(e: *mut TsnxEngine, id: i32, out: *m
         }
         None => TSNX_ENOTCONN,
     }
+}
+
+// ---- Taildrop -------------------------------------------------------------
+
+pub const TSNX_DROP_OFFER: u32 = 1;
+pub const TSNX_DROP_COMPLETE: u32 = 2;
+pub const TSNX_DROP_ABORTED: u32 = 3;
+
+#[repr(C)]
+pub struct TsnxDropEvent {
+    pub kind: u32,
+    pub id: u32,
+    /// OFFER: announced size (u64::MAX = unknown). COMPLETE: bytes received.
+    pub size: u64,
+    /// OFFER: the validated file name. Valid until the next poll.
+    pub name: *const c_char,
+    /// OFFER: the sending device's name. ABORTED: why. Valid until the next poll.
+    pub text: *const c_char,
+}
+
+fn c_text(dst: &mut Vec<u8>, s: &str) -> *const c_char {
+    dst.clear();
+    dst.extend(s.bytes().filter(|&b| b != 0));
+    dst.push(0);
+    dst.as_ptr().cast()
+}
+
+/// Starts receiving files on `port` of our tailnet addresses and advertises
+/// it. Returns 0, or -1 if the port is taken.
+#[no_mangle]
+pub unsafe extern "C" fn tsnx_taildrop_enable(e: *mut TsnxEngine, port: u16) -> i32 {
+    let e = &mut *e;
+    match e.engine.taildrop_enable(port) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn tsnx_taildrop_poll(e: *mut TsnxEngine, out: *mut TsnxDropEvent) -> bool {
+    use tsnx_core::engine::taildrop::DropEvent;
+    let e = &mut *e;
+    let Some(ev) = e.engine.taildrop_poll() else { return false };
+    *out = match ev {
+        DropEvent::Offer { id, name, size, from } => TsnxDropEvent {
+            kind: TSNX_DROP_OFFER,
+            id,
+            size: size.unwrap_or(u64::MAX),
+            name: c_text(&mut e.drop_name, &name),
+            text: c_text(&mut e.drop_text, &from),
+        },
+        DropEvent::Complete { id, bytes } => TsnxDropEvent {
+            kind: TSNX_DROP_COMPLETE,
+            id,
+            size: bytes,
+            name: c_text(&mut e.drop_name, ""),
+            text: c_text(&mut e.drop_text, ""),
+        },
+        DropEvent::Aborted { id, why } => TsnxDropEvent {
+            kind: TSNX_DROP_ABORTED,
+            id,
+            size: 0,
+            name: c_text(&mut e.drop_name, ""),
+            text: c_text(&mut e.drop_text, why),
+        },
+    };
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn tsnx_taildrop_accept(e: *mut TsnxEngine, id: u32, now_ns: u64) {
+    let e = &mut *e;
+    e.now = Instant::from_nanos(now_ns);
+    e.engine.taildrop_accept(id, e.now);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn tsnx_taildrop_read(e: *mut TsnxEngine, id: u32, buf: *mut u8, len: usize, now_ns: u64) -> usize {
+    let e = &mut *e;
+    e.now = Instant::from_nanos(now_ns);
+    if buf.is_null() || len == 0 {
+        return 0;
+    }
+    e.engine.taildrop_read(id, core::slice::from_raw_parts_mut(buf, len), e.now)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn tsnx_taildrop_finish(e: *mut TsnxEngine, id: u32, status: u16, msg: *const c_char, now_ns: u64) {
+    let e = &mut *e;
+    e.now = Instant::from_nanos(now_ns);
+    e.engine.taildrop_finish(id, status, cstr(msg).unwrap_or(""), e.now);
 }

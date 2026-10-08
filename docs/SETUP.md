@@ -105,11 +105,40 @@ Until either happens, the Switch can't reach the tailnet.
   "Connected. IP: 100.x.y.z" the first time the Switch connects. It doesn't
   appear again on wake or reconnect. Turn it off with **Notice when
   connected** in the overlay.
+- **Taildrop:** send files to the Switch from your other devices (see
+  [below](#taildrop)).
 - **Pause:** use the **Tailscale** switch in the overlay. While paused,
   tailnet connections fail at once and everything else works normally.
 - **Turn it off completely:** in the **Sysmodules** overlay
   (ovl-sysmodules), turn off tailscale-nx's boot setting and restart. It can't be stopped while it
   runs, because Atmosphère would freeze if its socket hook disappeared.
+
+## Taildrop
+
+Send files to the Switch with [Taildrop](https://tailscale.com/kb/1106/taildrop),
+like to any of your devices: **Send with Tailscale** in the share menu
+(Windows, macOS, iOS, Android), or `tailscale file cp photo.jpg nintendo-switch:`.
+
+- Files land in the **`Taildrop`** folder at the root of the SD card, and a
+  toast says so (with Ultrahand installed).
+- An existing file is never replaced: a second `photo.jpg` is saved as
+  `photo (1).jpg`.
+- A file is refused if it wouldn't leave 0.5% of the SD card free. The
+  sending device shows why.
+- While a file arrives it's called `<name>.partial`. If the transfer is
+  interrupted, that file is deleted.
+- **Files of 4 GB or more** on a FAT32 card are saved the way the Switch
+  stores large games: as a folder of parts that the Switch and homebrew read
+  as one file. On a computer it shows up as a folder. (A sender that doesn't
+  announce the size, such as `tailscale file cp -` from a pipe, stops at
+  4 GB on FAT32.)
+- **Only your own devices can send.** That's the same rule as Tailscale's own
+  apps. It doesn't work if the Switch was added with a **tagged** auth key,
+  because a tagged device doesn't belong to you. Sharing between users of a
+  tailnet isn't supported.
+- Taildrop has to be enabled for your tailnet. It is by default, on
+  Tailscale and on headscale.
+- Turn it off with `taildrop=off` in `config.ini`.
 
 ## Access rules
 
@@ -131,6 +160,7 @@ All settings are optional. They take effect after a restart.
 | `control_url` | `https://controlplane.tailscale.com` | Your headscale URL, if you use headscale |
 | `magicdns` | `on` | `off` stops writing tailnet names to the hosts file |
 | `connect_notice` | `on` | `off` turns off the "Connected" toast at boot (as does the overlay switch) |
+| `taildrop` | `on` | `off` stops receiving files with [Taildrop](#taildrop) |
 | `mitm` | `homebrew` | Which programs can reach the tailnet: `homebrew`, `off`, or `homebrew,sys-ftpd` (see below) |
 | `overlay_budget_kb` | `320` | Memory for tailnet sockets, shared by all apps (128–512). Raise it only if apps report "no buffer space". |
 | `ca_cert` | none | Extra CA certificate (DER) for a self-signed headscale |

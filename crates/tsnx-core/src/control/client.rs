@@ -124,6 +124,7 @@ pub struct ControlClient {
     login_url: Option<String>,
     ephemeral: [u8; 32],
     preferred_derp: Option<u32>,
+    peerapi_port: Option<u16>,
     endpoints: Vec<core::net::SocketAddr>,
     /// Immediate re-registrations after login-flow hiccups (bounded).
     register_retries: u32,
@@ -180,6 +181,7 @@ impl ControlClient {
             login_url: None,
             ephemeral: [0; 32],
             preferred_derp: None,
+            peerapi_port: None,
             endpoints: Vec::new(),
             register_retries: 0,
             old_node_key: None,
@@ -249,6 +251,17 @@ impl ControlClient {
         }
         self.preferred_derp = preferred_derp;
         self.endpoints = endpoints;
+        if let Err(e) = self.push_net_info() {
+            self.fail(&e);
+        }
+    }
+
+    /// Advertises (or stops advertising) our peer API port in Hostinfo.
+    pub fn set_peerapi_port(&mut self, port: Option<u16>) {
+        if self.peerapi_port == port {
+            return;
+        }
+        self.peerapi_port = port;
         if let Err(e) = self.push_net_info() {
             self.fail(&e);
         }
@@ -539,8 +552,13 @@ impl ControlClient {
             Some(r) => format!(r#","NetInfo":{{"PreferredDERP":{r}}}"#),
             None => String::new(),
         };
+        // Peers find our peer API (Taildrop) through these.
+        let services = match self.peerapi_port {
+            Some(p) => format!(r#","Services":[{{"Proto":"peerapi4","Port":{p}}},{{"Proto":"peerapi6","Port":{p}}}]"#),
+            None => String::new(),
+        };
         format!(
-            r#"{{"IPNVersion":"{}-tsnx","Hostname":{},"OS":"linux","OSVersion":"Horizon","DeviceModel":"Nintendo Switch","GoArch":"arm64"{net_info}}}"#,
+            r#"{{"IPNVersion":"{}-tsnx","Hostname":{},"OS":"linux","OSVersion":"Horizon","DeviceModel":"Nintendo Switch","GoArch":"arm64"{services}{net_info}}}"#,
             crate::VERSION,
             json_string(&self.cfg.hostname)
         )

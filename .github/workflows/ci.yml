@@ -16,3 +16,5 @@ jobs:
         run: cargo test -p tsnx-core
       - name: Unit tests with the Switch's buffer limits
         run: cargo test -p tsnx-core --features switch-limits
+      - name: Taildrop file saving
+        run: make drop-test

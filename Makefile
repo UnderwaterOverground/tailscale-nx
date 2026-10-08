@@ -15,12 +15,19 @@ else
   SW := docker run --rm -v "$(CURDIR)":/src -v tsnx-cargo-registry:/opt/cargo/registry -e CARGO_TARGET_DIR=/src/target/switch -w /src $(DOCKER_IMAGE)
 endif
 
-.PHONY: publish release overlay mitm-test nxlink-mitm-test all host-test host-c e2e sysmodule libstratosphere docker-image rust-switch nro nxlink clean
+.PHONY: drop-test publish release overlay mitm-test nxlink-mitm-test all host-test host-c e2e sysmodule libstratosphere docker-image rust-switch nro nxlink clean
 
 all: host-test nro
 
-host-test:
+host-test: drop-test
 	cargo test --workspace
+
+# Taildrop's file saving (native/driver/tsnx_drop.c) on a temporary folder.
+drop-test:
+	@mkdir -p target
+	$(CC) -Wall -Wextra -O1 -g -fsanitize=address,undefined -Icrates/tsnx-ffi/include -Inative/driver \
+		-o target/drop-test native/host/drop_test.c native/driver/tsnx_drop.c
+	target/drop-test
 
 # Local tailnet end-to-end tests (headscale + stock tailscaled in Docker).
 e2e:
@@ -28,7 +35,7 @@ e2e:
 	e2e/run-tests.sh
 
 # Host build of the C driver + FFI (the Switch app's code paths, on the Mac).
-HOST_C_SRCS := native/host/main.c native/driver/tsnx_driver.c native/driver/tsnx_app.c native/driver/tsnx_dns.c
+HOST_C_SRCS := native/host/main.c native/driver/tsnx_driver.c native/driver/tsnx_app.c native/driver/tsnx_dns.c native/driver/tsnx_drop.c
 host-c: target/tsnx-c
 
 target/tsnx-c: $(HOST_C_SRCS) native/driver/*.h crates/tsnx-ffi/include/tsnx.h FORCE
@@ -109,7 +116,7 @@ clean:
 # Interpose shim (run unmodified programs through the socket virtualization
 # layer) and its test client, for macOS.
 VSOCK_SRCS := native/vsock/vsock.cpp native/runtime/runtime.cpp native/interpose/interpose.cpp
-VSOCK_C_SRCS := native/driver/tsnx_driver.c native/driver/tsnx_app.c
+VSOCK_C_SRCS := native/driver/tsnx_driver.c native/driver/tsnx_app.c native/driver/tsnx_drop.c
 VSOCK_INC := -Icrates/tsnx-ffi/include -Inative/driver -Inative/runtime -Inative/vsock
 .PHONY: interpose
 interpose: target/libtsnx_interpose.dylib target/vsock-test
@@ -119,7 +126,8 @@ target/libtsnx_interpose.dylib: $(VSOCK_SRCS) $(VSOCK_C_SRCS) native/*/*.h* FORC
 	$(CC) -c -O1 -g -Wall $(VSOCK_INC) native/driver/tsnx_driver.c -o target/tsnx_driver.o
 	$(CC) -c -O1 -g -Wall -DTSNX_BUILD_UNIX=$(BUILD_UNIX) $(VSOCK_INC) native/driver/tsnx_app.c -o target/tsnx_app.o
 	$(CC) -c -O1 -g -Wall $(VSOCK_INC) native/driver/tsnx_dns.c -o target/tsnx_dns.o
-	$(CXX) -std=c++17 -O1 -g -Wall -dynamiclib -o $@ $(VSOCK_INC) $(VSOCK_SRCS) target/tsnx_driver.o target/tsnx_app.o target/tsnx_dns.o \
+	$(CC) -c -O1 -g -Wall $(VSOCK_INC) native/driver/tsnx_drop.c -o target/tsnx_drop.o
+	$(CXX) -std=c++17 -O1 -g -Wall -dynamiclib -o $@ $(VSOCK_INC) $(VSOCK_SRCS) target/tsnx_driver.o target/tsnx_app.o target/tsnx_dns.o target/tsnx_drop.o \
 		target/debug/libtsnx_ffi.a -framework CoreFoundation -framework Security
 
 target/vsock-test: native/interpose/vsock_test.c

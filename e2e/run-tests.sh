@@ -139,4 +139,36 @@ else
 fi
 docker rm -f "$EXP" >/dev/null 2>&1
 
+# 9. Taildrop: the stock client sends files with `tailscale file cp`.
+DROP=tsnx-drop
+docker rm -f "$DROP" >/dev/null 2>&1
+docker compose run --rm -T -d --name "$DROP" -e TSNX_CONTROL_URL=https://headscale \
+  -e TSNX_EXTRA_ROOT=/state/certs/ca.der -e TSNX_STATE=/state/host/drop.state \
+  -e TSNX_AUTHKEY="$(cat state/authkey)" -e TSNX_HOSTNAME="$DROP" -e TSNX_PORT=41646 -e TSNX_WAIT_READY=1 \
+  -e TSNX_TAILDROP_DIR=/tmp/Taildrop -e LD_PRELOAD=/src/target/linux/libtsnx_interpose.so \
+  --entrypoint python3 tsnx -c 'import socket, threading; socket.socket().close(); threading.Event().wait()' >/dev/null
+for _ in $(seq 30); do
+  peer tailscale file cp --targets 2>/dev/null | grep -q "$DROP" && break
+  sleep 1
+done
+sha() { awk '{print $1}'; }
+peer sh -c 'head -c 3000000 /dev/urandom > /tmp/td.bin && echo small > /tmp/td2.txt'
+want=$(peer sha256sum /tmp/td.bin | sha)
+if peer tailscale file cp /tmp/td.bin "$DROP:" && peer tailscale file cp /tmp/td.bin "$DROP:" &&
+   [[ "$(docker exec "$DROP" sha256sum /tmp/Taildrop/td.bin | sha)" == "$want" ]] &&
+   [[ "$(docker exec "$DROP" sha256sum "/tmp/Taildrop/td (1).bin" | sha)" == "$want" ]]; then
+  pass "Taildrop receive (3 MB, twice: no overwrite)"
+else
+  fail "Taildrop receive (see docker logs $DROP)"
+fi
+# Unknown length (from stdin): sent chunked.
+if peer sh -c "cat /tmp/td2.txt | tailscale file cp --name=streamed.txt - $DROP:" &&
+   [[ "$(docker exec "$DROP" cat /tmp/Taildrop/streamed.txt)" == "small" ]] &&
+   ! docker exec "$DROP" sh -c 'ls /tmp/Taildrop | grep -q partial'; then
+  pass "Taildrop receive of unknown length"
+else
+  fail "Taildrop receive of unknown length"
+fi
+docker rm -f "$DROP" >/dev/null 2>&1
+
 [[ $fails -eq 0 ]] && echo "all e2e tests passed" || { echo "$fails e2e test(s) failed"; exit 1; }

@@ -167,6 +167,33 @@ void tsnx_net_close(TsnxEngine *e, int32_t id);
 int32_t tsnx_net_local_addr(TsnxEngine *e, int32_t id, TsnxAddr *out);
 int32_t tsnx_net_peer_addr(TsnxEngine *e, int32_t id, TsnxAddr *out);
 
+// Taildrop receive (the peer API's PUT /v0/put/<name>). After enabling, the
+// driver polls for events: OFFER (answer with accept, or finish with an
+// error status), then reads the body with tsnx_taildrop_read until COMPLETE
+// (then finish with 200 once the file is saved) or ABORTED (discard it; no
+// finish needed). The engine never touches files.
+#define TSNX_DROP_OFFER 1u
+#define TSNX_DROP_COMPLETE 2u
+#define TSNX_DROP_ABORTED 3u
+
+typedef struct {
+    uint32_t kind;
+    uint32_t id;
+    uint64_t size;     // OFFER: announced size (UINT64_MAX = unknown); COMPLETE: bytes received
+    const char *name;  // OFFER: validated file name (safe in any directory)
+    const char *text;  // OFFER: sending device; ABORTED: why
+} TsnxDropEvent;      // strings valid until the next tsnx_taildrop_poll
+
+// Listens on `port` of our tailnet addresses and advertises it. 0 or -1.
+int32_t tsnx_taildrop_enable(TsnxEngine *e, uint16_t port);
+bool tsnx_taildrop_poll(TsnxEngine *e, TsnxDropEvent *out);
+void tsnx_taildrop_accept(TsnxEngine *e, uint32_t id, uint64_t now_ns);
+// Body bytes into buf; 0 when none are available yet or the transfer ended.
+size_t tsnx_taildrop_read(TsnxEngine *e, uint32_t id, uint8_t *buf, size_t len, uint64_t now_ns);
+// Ends a transfer: 200 when saved, else an HTTP error status (e.g. 507 no
+// space, 500 write failed) and a message the sender shows.
+void tsnx_taildrop_finish(TsnxEngine *e, uint32_t id, uint16_t status, const char *msg, uint64_t now_ns);
+
 // Must be provided by the embedding program on no_std targets. Called with a
 // (non NUL-terminated) panic message; must not return.
 #ifdef __cplusplus

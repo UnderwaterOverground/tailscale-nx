@@ -38,6 +38,25 @@ int tsnx_driver_resume(TsnxDriver *d);
 // reaching a container hostname through a published port). Copied.
 void tsnx_driver_set_connect_map(TsnxDriver *d, const char *map);
 
+// Where Taildrop puts received files. Called on whichever thread drives the
+// engine, one file at a time. Failures return an HTTP status for the sender
+// (e.g. 507 no space, 500 write error) with a message in why[why_cap].
+typedef struct {
+    void *ctx;
+    // A peer offers `name` (validated: safe in any directory) of `size`
+    // bytes (UINT64_MAX = unknown) from device `from`: 0 to take it (the
+    // file is then open for writing), or a status to refuse.
+    int (*open)(void *ctx, const char *name, uint64_t size, const char *from, char *why, size_t why_cap);
+    // Appends data: 0, or a status (the transfer is then cancelled).
+    int (*write)(void *ctx, const uint8_t *data, size_t len, char *why, size_t why_cap);
+    // ok: everything arrived; save the file (0, or a status). !ok: discard
+    // what was written (return value ignored).
+    int (*close)(void *ctx, int ok, char *why, size_t why_cap);
+} TsnxDropSink;
+
+// Receives Taildrop files on `port` into `sink` (copied). Returns 0, or -1.
+int tsnx_driver_set_taildrop(TsnxDriver *d, const TsnxDropSink *sink, uint16_t port);
+
 // Most file descriptors the driver polls (connections + its UDP socket).
 #define TSNX_DRIVER_MAX_FDS 33
 

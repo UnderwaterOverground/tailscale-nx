@@ -7,6 +7,7 @@ mod filter;
 mod magic;
 mod netmap;
 mod packet;
+pub mod taildrop;
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
@@ -82,6 +83,9 @@ struct Peer {
     endpoints: Vec<SocketAddr>,
     wg: PeerId,
     path: magic::PathState,
+    /// Owner, for Taildrop's "only my own devices" rule.
+    user: i64,
+    tagged: bool,
 }
 
 #[derive(Clone)]
@@ -153,6 +157,13 @@ pub struct Engine {
     /// The expiry we already replaced the key for: the netmap may report it
     /// again until the server catches up, and that must not rotate twice.
     expiry_handled: Option<u64>,
+    /// Taildrop receive, once the driver enables it.
+    taildrop: Option<taildrop::Server>,
+    /// From our own node in the netmap: owner, and whether the tailnet
+    /// allows file sharing.
+    self_user: i64,
+    self_tagged: bool,
+    file_sharing: bool,
 }
 
 /// How often buffers that grew for a burst are shrunk back.
@@ -202,6 +213,10 @@ impl Engine {
             filter: filter::Filter::default(),
             key_expiry: None,
             expiry_handled: None,
+            taildrop: None,
+            self_user: 0,
+            self_tagged: false,
+            file_sharing: false,
         })
     }
 
@@ -264,6 +279,9 @@ impl Engine {
             }
         }
         if let Some(at) = self.key_expiry_deadline() {
+            t = t.min(at);
+        }
+        if let Some(at) = self.taildrop.as_ref().and_then(|td| td.deadline()) {
             t = t.min(at);
         }
         t.min(self.last_trim + TRIM_INTERVAL).min(self.magic_deadline())
@@ -397,6 +415,75 @@ impl Engine {
         self.pump();
     }
 
+    // ---- Taildrop (see taildrop.rs) ----------------------------------------
+
+    /// Receives files on `port` of our tailnet addresses and advertises it
+    /// to peers.
+    pub fn taildrop_enable(&mut self, port: u16) -> Result<(), String> {
+        if self.taildrop.is_some() {
+            return Ok(());
+        }
+        let server = taildrop::Server::new(&mut self.net, port).map_err(|e| format!("port {port}: {e:?}"))?;
+        self.taildrop = Some(server);
+        self.control.set_peerapi_port(Some(port));
+        self.pump();
+        Ok(())
+    }
+
+    pub fn taildrop_poll(&mut self) -> Option<taildrop::DropEvent> {
+        self.taildrop.as_mut()?.poll_event()
+    }
+
+    pub fn taildrop_accept(&mut self, id: u32, now: Instant) {
+        self.now = now;
+        if let Some(td) = self.taildrop.as_mut() {
+            td.accept(&mut self.net, now, id);
+        }
+        self.pump();
+    }
+
+    /// Pulls body bytes of transfer `id` (see [`taildrop::Server::read`]).
+    pub fn taildrop_read(&mut self, id: u32, buf: &mut [u8], now: Instant) -> usize {
+        self.now = now;
+        let Some(td) = self.taildrop.as_mut() else { return 0 };
+        let n = td.read(&mut self.net, now, id, buf);
+        // Reading opened the receive window: tell the sender.
+        self.pump();
+        n
+    }
+
+    /// Ends transfer `id`: `status` 200 once the file is saved, else an
+    /// HTTP error status and a message the sender will show.
+    pub fn taildrop_finish(&mut self, id: u32, status: u16, msg: &str, now: Instant) {
+        self.now = now;
+        if let Some(td) = self.taildrop.as_mut() {
+            td.finish(&mut self.net, now, id, status, msg);
+        }
+        self.pump();
+    }
+
+    fn service_taildrop(&mut self) {
+        let Some(td) = self.taildrop.as_mut() else { return };
+        let (peers, file_sharing, self_user, self_tagged) = (&self.peers, self.file_sharing, self.self_user, self.self_tagged);
+        // Like Tailscale: only our own (untagged) devices may send, and only
+        // if the tailnet allows file sharing.
+        let who = |ip: IpAddr| -> Result<String, taildrop::Denied> {
+            if !file_sharing {
+                return Err(taildrop::Denied::Disabled);
+            }
+            let full = |p: &Prefix| p.addr == ip && p.len == if ip.is_ipv4() { 32 } else { 128 };
+            let peer = peers.values().find(|p| p.prefixes.iter().any(full)).ok_or(taildrop::Denied::Forbidden)?;
+            if self_tagged || peer.tagged || self_user == 0 || peer.user != self_user {
+                return Err(taildrop::Denied::Forbidden);
+            }
+            Ok(peer.name.split('.').next().unwrap_or_default().into())
+        };
+        td.service(&mut self.net, self.now, &who);
+        while let Some(line) = td.poll_log() {
+            self.events.push_back(Event::Log(line));
+        }
+    }
+
     // ---- plumbing --------------------------------------------------------
 
     fn pump(&mut self) {
@@ -437,6 +524,10 @@ impl Engine {
 
         // Overlay stack -> tunnel.
         self.net.poll(self.now);
+        if self.taildrop.is_some() {
+            self.service_taildrop();
+            self.net.poll(self.now);
+        }
         let outbound: Vec<Vec<u8>> = self.net.take_outbound().collect();
         if !outbound.is_empty() {
             let mut by_peer: BTreeMap<u32, Vec<PacketMut>> = BTreeMap::new();
@@ -589,6 +680,7 @@ impl Engine {
             log::debug!("self node key expiry: {:?}", node.key_expiry());
             self.key_expiry = node.key_expiry();
             self.check_key_expiry();
+            (self.self_user, self.self_tagged, self.file_sharing) = (node.user, node.tagged, node.file_sharing);
             if !node.name.is_empty() && self.self_name != node.name {
                 self.self_name = node.name.as_ref().into();
             }
@@ -712,7 +804,18 @@ impl Engine {
         };
         self.peers.insert(
             n.id,
-            Peer { name: n.name.as_ref().into(), key, disco: disco_key, prefixes, home_derp, endpoints: n.endpoints(), wg, path },
+            Peer {
+                name: n.name.as_ref().into(),
+                key,
+                disco: disco_key,
+                prefixes,
+                home_derp,
+                endpoints: n.endpoints(),
+                wg,
+                path,
+                user: n.user,
+                tagged: n.tagged,
+            },
         );
         if disco_changed {
             // The peer restarted; like Go, drop the old WireGuard session.

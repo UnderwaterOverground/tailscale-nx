@@ -20,3 +20,5 @@ hostname=nintendo-switch
 # A 5-second "Connected. IP: ..." toast after each boot (also switchable in
 # the overlay).
 # connect_notice=on
+# Receive files sent with Taildrop into the Taildrop folder on the SD card.
+# taildrop=on

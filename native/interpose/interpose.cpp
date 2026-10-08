@@ -9,7 +9,8 @@
 // Configuration (environment): TSNX_CONTROL_URL (required to activate),
 // TSNX_AUTHKEY, TSNX_HOSTNAME, TSNX_STATE, TSNX_EXTRA_ROOT, TSNX_CONNECT_MAP,
 // TSNX_PORT, TSNX_WAIT_READY=1 (block startup until the netmap arrives),
-// TSNX_LOG=1 (print engine events to stderr).
+// TSNX_LOG=1 (print engine events to stderr), TSNX_TAILDROP_DIR (receive
+// Taildrop files there) and TSNX_TAILDROP_PORT.
 #include <thread>
 #include <dlfcn.h>
 #include <errno.h>
@@ -155,6 +156,8 @@ void Init() {
     cfg.extra_root_path = Env("TSNX_EXTRA_ROOT");
     cfg.connect_map = Env("TSNX_CONNECT_MAP");
     cfg.udp_port = static_cast<uint16_t>(atoi(Env("TSNX_PORT", "0").c_str()));
+    cfg.taildrop_dir = Env("TSNX_TAILDROP_DIR");
+    cfg.taildrop_port = static_cast<uint16_t>(atoi(Env("TSNX_TAILDROP_PORT", "41643").c_str()));
     static std::atomic<int> peers{0};
     bool log = Env("TSNX_LOG") == "1";
     cfg.on_event = [log](const TsnxEvent &ev) {

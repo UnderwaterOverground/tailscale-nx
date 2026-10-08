@@ -10,7 +10,7 @@
 //                                    mitm=homebrew|homebrew,sys-ftpd|off,
 //                                    magicdns=on|off,
 //                                    overlay_budget_kb=<128..512>,
-//                                    connect_notice=on|off)
+//                                    connect_notice=on|off, taildrop=on|off)
 //   config/tailscale-nx/state        node keys, shared with the app
 //   config/tailscale-nx/disabled     kill switch: if present, exit at boot
 //   config/tailscale-nx/crashed      written after 3 boots in a row that ended
@@ -48,6 +48,7 @@ extern "C" {
 #include "runtime.hpp"
 #include "stack_watch.hpp"
 #include "status.hpp"
+#include "taildrop.hpp"
 
 namespace ams {
 
@@ -237,6 +238,7 @@ namespace ams {
             char magicdns[8] = "on";      // tailnet names in Atmosphere's hosts file, or "off"
             char overlay_budget_kb[8] = {};  // tailnet socket buffers; default 320
             char connect_notice[8] = "on";   // toast with our address when first connected
+            char taildrop[8] = "on";         // receive files into sdmc:/Taildrop
         };
 
         void LoadConfig(Config &c) {
@@ -261,6 +263,7 @@ namespace ams {
                 set("magicdns", c.magicdns, sizeof c.magicdns);
                 set("overlay_budget_kb", c.overlay_budget_kb, sizeof c.overlay_budget_kb);
                 set("connect_notice", c.connect_notice, sizeof c.connect_notice);
+                set("taildrop", c.taildrop, sizeof c.taildrop);
             }
         }
 
@@ -752,6 +755,8 @@ namespace ams {
             return;
         }
         Log("engine started: control %s, hostname %s", cfg.control_url, cfg.hostname);
+        // Before the loop and the MITM threads use the engine.
+        if (std::strcmp(cfg.taildrop, "off") != 0) taildrop::Start(driver);
 
         // Homebrew sockets to tailnet addresses go through the engine.
         // The log socket goes down and up with the engine's own (sleep).

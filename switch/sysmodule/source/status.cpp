@@ -121,6 +121,26 @@ namespace ams::status {
             WriteFile(ConnectedNotifyPath, json, static_cast<size_t>(n));
         }
 
+        // `src` as JSON string content, at most `max` bytes of it (cut at a
+        // character boundary, with "..."): quotes and backslashes escaped,
+        // control characters dropped, UTF-8 kept.
+        void JsonText(char *dst, size_t cap, const char *src, size_t max) {
+            size_t n = 0, taken = 0;
+            for (const char *p = src; *p && n + 8 < cap; p++) {
+                const unsigned char c = static_cast<unsigned char>(*p);
+                // Cut only before the first byte of a character.
+                if (taken >= max && (c & 0xC0) != 0x80) {
+                    dst[n++] = '.', dst[n++] = '.', dst[n++] = '.';
+                    break;
+                }
+                taken++;
+                if (c < 0x20 || c == 0x7f) continue;
+                if (c == '"' || c == '\\') dst[n++] = '\\';
+                dst[n++] = static_cast<char>(c);
+            }
+            dst[n] = 0;
+        }
+
         void ClearLogin() {
             static_cast<void>(fs::DeleteFile(LoginPath));
             static_cast<void>(fs::DeleteFile(NotifyPath));
@@ -203,6 +223,34 @@ namespace ams::status {
             default:
                 break;
         }
+    }
+
+    void AnnounceFile(bool saved, const char *name, u64 bytes, const char *from, const char *why) {
+        if (!Exists(NotifyDir, fs::DirectoryEntryType_Directory)) return;
+        char n[96], f[48], w[200], size[24];
+        JsonText(n, sizeof n, name, 48);
+        JsonText(f, sizeof f, from, 24);
+        JsonText(w, sizeof w, why, 120);
+        if (bytes >= 1'000'000) {
+            util::SNPrintf(size, sizeof size, "%lu.%lu MB", static_cast<unsigned long>(bytes / 1'000'000), static_cast<unsigned long>(bytes / 100'000 % 10));
+        } else {
+            util::SNPrintf(size, sizeof size, "%lu KB", static_cast<unsigned long>((bytes + 999) / 1000));
+        }
+        static char json[512];
+        const int len = saved ? util::SNPrintf(json, sizeof json,
+                                               "{\n    \"title\": \"Taildrop\",\n    \"text\": \"Received %s (%s) from %s. It's in the Taildrop folder.\",\n"
+                                               "    \"font_size\": 18,\n    \"duration\": 6000,\n    \"priority\": 10\n}\n",
+                                               n, size, f)
+                              : util::SNPrintf(json, sizeof json,
+                                               "{\n    \"title\": \"Taildrop\",\n    \"text\": \"Couldn't receive %s from %s: %s.\",\n"
+                                               "    \"font_size\": 18,\n    \"duration\": 8000,\n    \"priority\": 10\n}\n",
+                                               n, f, w);
+        // Several files in a row: a file each, so none replaces another
+        // before Ultrahand shows it.
+        static u32 seq = 0;
+        char path[96];
+        util::SNPrintf(path, sizeof path, "%s/tailscale-nx-taildrop-%u.notify", NotifyDir, static_cast<unsigned>(seq++ % 8));
+        WriteFile(path, json, static_cast<size_t>(len));
     }
 
     TsnxCtlStatus Get() {

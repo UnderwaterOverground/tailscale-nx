@@ -64,6 +64,73 @@ pub struct Node<'a> {
     /// RFC 3339; Go's zero time (year 1) when the key never expires.
     #[serde(borrow, default)]
     key_expiry: Option<&'a str>,
+    /// The owning user's ID (tagged nodes belong to a shared tagged user).
+    #[serde(default)]
+    pub user: i64,
+    #[serde(rename = "Tags", default, deserialize_with = "non_empty_list")]
+    pub tagged: bool,
+    /// Whether the node's capabilities include Taildrop (file sharing).
+    #[serde(rename = "CapMap", default, deserialize_with = "has_file_sharing")]
+    pub file_sharing: bool,
+}
+
+const CAP_FILE_SHARING: &str = "https://tailscale.com/cap/file-sharing";
+
+/// True for a non-empty JSON list (null and [] are false); elements skipped.
+fn non_empty_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = bool;
+        fn expecting(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+            f.write_str("a list or null")
+        }
+        fn visit_unit<E>(self) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_none<E>(self) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> Result<bool, D::Error> {
+            d.deserialize_seq(self)
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<bool, A::Error> {
+            let mut any = false;
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                any = true;
+            }
+            Ok(any)
+        }
+    }
+    d.deserialize_option(V)
+}
+
+/// True if a CapMap object (or null) has the file-sharing key; values skipped.
+fn has_file_sharing<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = bool;
+        fn expecting(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+            f.write_str("a capability map or null")
+        }
+        fn visit_unit<E>(self) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_none<E>(self) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> Result<bool, D::Error> {
+            d.deserialize_map(self)
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+            let mut found = false;
+            while let Some(k) = map.next_key::<Cow<'de, str>>()? {
+                found |= k == CAP_FILE_SHARING;
+                map.next_value::<serde::de::IgnoredAny>()?;
+            }
+            Ok(found)
+        }
+    }
+    d.deserialize_option(V)
 }
 
 impl Node<'_> {
@@ -250,7 +317,8 @@ mod tests {
     const MAP: &str = r#"{
         "KeepAlive": false,
         "Node": {"ID": 1, "Name": "me.ts.net.", "Key": "nodekey:0101010101010101010101010101010101010101010101010101010101010101",
-                 "Addresses": ["100.64.0.2/32", "fd7a:115c:a1e0::2/128"], "Hostinfo": {"OS": "switch", "Services": [{"Proto": "tcp", "Port": 22}]}},
+                 "Addresses": ["100.64.0.2/32", "fd7a:115c:a1e0::2/128"], "User": 5,
+                 "CapMap": {"https://tailscale.com/cap/file-sharing": null, "https:\/\/example.com\/cap": [{"a": 1}]}, "Hostinfo": {"OS": "switch", "Services": [{"Proto": "tcp", "Port": 22}]}},
         "DERPMap": {"Regions": {
             "1": {"RegionID": 1, "RegionCode": "nyc", "Nodes": [
                 {"Name": "1a", "RegionID": 1, "HostName": "derp1a.example", "IPv4": "192.0.2.1", "STUNPort": 0},
@@ -261,9 +329,10 @@ mod tests {
             {"ID": 7, "Name": "peer é.ts.net.", "Key": "nodekey:0202020202020202020202020202020202020202020202020202020202020202",
              "DiscoKey": "discokey:0303030303030303030303030303030303030303030303030303030303030303",
              "Addresses": ["100.64.0.7/32"], "AllowedIPs": ["100.64.0.7/32", "10.0.0.0/8"],
-             "Endpoints": ["198.51.100.4:41641", "[2001:db8::1]:41641"], "HomeDERP": 1, "CapMap": {"x": [1, 2]}},
+             "Endpoints": ["198.51.100.4:41641", "[2001:db8::1]:41641"], "HomeDERP": 1, "CapMap": {"x": [1, 2]}, "User": 5, "Tags": null},
             {"ID": 8, "Key": "nodekey:0404040404040404040404040404040404040404040404040404040404040404",
-             "Addresses": null, "AllowedIPs": null, "Endpoints": null, "DERP": "127.3.3.40:900"}
+             "Addresses": null, "AllowedIPs": null, "Endpoints": null, "DERP": "127.3.3.40:900",
+             "User": 9, "Tags": ["tag:server"], "CapMap": null}
         ],
         "PeersRemoved": [3],
         "PeersChangedPatch": [{"NodeID": 7, "DERPRegion": 900, "Endpoints": ["203.0.113.9:1"]}],
@@ -277,6 +346,7 @@ mod tests {
         let m = parse(MAP.as_bytes()).unwrap();
         let me = m.node.as_ref().unwrap();
         assert_eq!(me.addresses().len(), 2);
+        assert!(me.file_sharing && me.user == 5 && !me.tagged);
 
         let regions = &m.derp_map.as_ref().unwrap().regions;
         let r1 = regions[&1].nodes.as_ref().unwrap();
@@ -295,6 +365,8 @@ mod tests {
         assert_eq!(peers[0].endpoints().len(), 2);
         assert_eq!(peers[0].home_derp(), Some(1));
         assert_eq!(peers[1].home_derp(), Some(900));
+        assert!(!peers[0].tagged && !peers[0].file_sharing && peers[0].user == 5);
+        assert!(peers[1].tagged && peers[1].user == 9);
         assert!(peers[1].allowed_prefixes().is_empty() && peers[1].endpoints().is_empty());
 
         assert_eq!(m.peers_removed.as_deref(), Some(&[3][..]));

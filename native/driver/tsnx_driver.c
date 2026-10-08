@@ -47,6 +47,9 @@ struct TsnxDriver {
     Conn *poll_owners[MAX_CONNS];
     uint32_t poll_ids[MAX_CONNS];
     int poll_conns, poll_udp;
+    TsnxDropSink drop;
+    uint32_t drop_id;  // transfer being written, 0 = none
+    int in_drop;
 };
 
 uint64_t tsnx_driver_now_ns(void) {
@@ -97,6 +100,10 @@ static void map_target(TsnxDriver *d, char *host, size_t host_cap, uint16_t *por
 
 void tsnx_driver_free(TsnxDriver *d) {
     if (!d) return;
+    if (d->drop_id) {
+        char ignored[8];
+        d->drop.close(d->drop.ctx, 0, ignored, sizeof ignored);
+    }
     free(d->connect_map);
     if (d->udp_fd >= 0) close(d->udp_fd);
     for (int i = 0; i < MAX_CONNS; i++)
@@ -288,6 +295,8 @@ static int conn_queue(Conn *c, const uint8_t *data, size_t len) {
     return 0;
 }
 
+static void pump_taildrop(TsnxDriver *d);
+
 // Drains engine I/O requests and events.
 static void pump_engine(TsnxDriver *d) {
     TsnxIo io;
@@ -314,6 +323,74 @@ static void pump_engine(TsnxDriver *d) {
     TsnxEvent ev;
     while (tsnx_engine_poll_event(d->engine, &ev))
         if (d->on_event) d->on_event(d->ctx, &ev);
+    pump_taildrop(d);
+}
+
+int tsnx_driver_set_taildrop(TsnxDriver *d, const TsnxDropSink *sink, uint16_t port) {
+    if (!sink || !sink->open || !sink->write || !sink->close) return -1;
+    d->drop = *sink;
+    return tsnx_taildrop_enable(d->engine, port) == 0 ? 0 : -1;
+}
+
+// Ends the transfer being written: the sink saves or discards it, and the
+// sender gets the outcome (status 0 = saved).
+static void drop_end(TsnxDriver *d, int saved_ok, int status, const char *why) {
+    uint32_t id = d->drop_id;
+    char msg[160];
+    snprintf(msg, sizeof msg, "%s", why ? why : "");
+    d->drop_id = 0;
+    if (saved_ok) {
+        status = d->drop.close(d->drop.ctx, 1, msg, sizeof msg);
+    } else {
+        char ignored[8];
+        d->drop.close(d->drop.ctx, 0, ignored, sizeof ignored);
+    }
+    tsnx_taildrop_finish(d->engine, id, (uint16_t)(status ? status : 200), msg, tsnx_driver_now_ns());
+}
+
+// Moves Taildrop data from the engine to the sink: answers offers, then
+// reads the body (into rbuf, free between socket reads) and writes it out.
+static void pump_taildrop(TsnxDriver *d) {
+    if (!d->drop.open || d->in_drop) return;
+    d->in_drop = 1;  // finish/accept pump the engine, which calls back here
+    char why[160];
+    for (;;) {
+        int had_event = 0;
+        TsnxDropEvent ev;
+        while (tsnx_taildrop_poll(d->engine, &ev)) {
+            had_event = 1;
+            uint64_t now = tsnx_driver_now_ns();
+            why[0] = 0;
+            if (ev.kind == TSNX_DROP_OFFER) {
+                if (d->drop_id) {
+                    tsnx_taildrop_finish(d->engine, ev.id, 503, "busy receiving another file", now);
+                    continue;
+                }
+                int st = d->drop.open(d->drop.ctx, ev.name, ev.size, ev.text, why, sizeof why);
+                if (st == 0) {
+                    d->drop_id = ev.id;
+                    tsnx_taildrop_accept(d->engine, ev.id, now);
+                } else {
+                    tsnx_taildrop_finish(d->engine, ev.id, (uint16_t)st, why, now);
+                }
+            } else if (ev.id == d->drop_id && ev.kind == TSNX_DROP_COMPLETE) {
+                drop_end(d, 1, 0, NULL);
+            } else if (ev.id == d->drop_id && ev.kind == TSNX_DROP_ABORTED) {
+                d->drop_id = 0;
+                d->drop.close(d->drop.ctx, 0, why, sizeof why);
+            }
+        }
+        if (!d->drop_id) break;
+        size_t n = tsnx_taildrop_read(d->engine, d->drop_id, d->rbuf, sizeof d->rbuf, tsnx_driver_now_ns());
+        if (n > 0) {
+            why[0] = 0;
+            int st = d->drop.write(d->drop.ctx, d->rbuf, n, why, sizeof why);
+            if (st != 0) drop_end(d, 0, st, why);
+        } else if (!had_event) {
+            break;  // nothing more for now (an ending shows up as an event)
+        }
+    }
+    d->in_drop = 0;
 }
 
 void tsnx_driver_pump(TsnxDriver *d) { pump_engine(d); }

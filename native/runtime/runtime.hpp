@@ -19,6 +19,7 @@
 
 #include "tsnx.h"
 #include "tsnx_driver.h"
+#include "tsnx_drop.h"
 
 namespace tsnx {
 
@@ -30,6 +31,9 @@ struct RuntimeConfig {
     std::string extra_root_path;  // optional DER root certificate
     std::string connect_map;      // optional dev address rewrites
     uint16_t udp_port = 0;
+    // Taildrop: save received files into this folder (empty = off).
+    std::string taildrop_dir;
+    uint16_t taildrop_port = 0;
     // Called on the engine thread with the lock held; must not call back in.
     std::function<void(const TsnxEvent &)> on_event;
 };
@@ -127,6 +131,7 @@ private:
     std::function<void()> on_suspend_, on_resume_;
     bool suspended_ = false;
     int wake_rx_ = -1, wake_tx_ = -1;
+    std::unique_ptr<TsnxDropDir> drop_;  // Taildrop folder state (Start())
 };
 
 }  // namespace tsnx

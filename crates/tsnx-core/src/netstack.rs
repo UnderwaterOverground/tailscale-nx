@@ -141,7 +141,8 @@ enum Sock {
     Tcp(SocketHandle),
     /// A listener keeps one smoltcp socket listening at a time and moves
     /// connected ones to `ready` (smoltcp listeners accept a single peer).
-    /// `listening` is None while the budget can't fund another socket.
+    /// `listening` is funded only when a SYN arrives for the port and freed
+    /// again if none is pending, so an idle listener costs no buffers.
     Listener { port: u16, listening: Option<SocketHandle>, ready: VecDeque<SocketHandle>, backlog: usize },
     /// UDP is handled here rather than by smoltcp: received datagrams are
     /// queued as they arrive, so an idle socket costs nothing.
@@ -233,6 +234,9 @@ impl Netstack {
     /// Delivers an IP packet received from the tunnel.
     pub fn inject(&mut self, packet: Vec<u8>) {
         if let Some(packet) = self.deliver_udp(packet) {
+            if let Some(port) = self.syn_port(&packet) {
+                self.arm_listener(port);
+            }
             self.dev.inbound.push_back(packet);
         }
     }
@@ -300,8 +304,7 @@ impl Netstack {
         if in_use || port == 0 {
             return Err(NetError::AddrInUse);
         }
-        let listening = self.new_listening(port)?;
-        Ok(self.insert(Sock::Listener { port, listening: Some(listening), ready: VecDeque::new(), backlog: backlog.max(1) }))
+        Ok(self.insert(Sock::Listener { port, listening: None, ready: VecDeque::new(), backlog: backlog.max(1) }))
     }
 
     /// Accepts a pending connection on a listener.
@@ -414,6 +417,15 @@ impl Netstack {
             Sock::Tcp(h) => self.sockets.get::<tcp::Socket>(*h).remote_endpoint().map(socket_addr),
             _ => None,
         }
+    }
+
+    /// Closes a TCP connection with a reset, dropping unsent and unread
+    /// data (other sockets: same as [`Self::close`]).
+    pub fn abort(&mut self, id: SockId) {
+        if let Some(Sock::Tcp(h)) = self.socks.get(&id) {
+            self.sockets.get_mut::<tcp::Socket>(*h).abort();
+        }
+        self.close(id);
     }
 
     pub fn close(&mut self, id: SockId) {
@@ -535,11 +547,54 @@ impl Netstack {
         p
     }
 
-    /// Moves connected listener sockets to the accept queue and re-arms.
+    /// The destination port of a TCP SYN (connection attempt) to one of our
+    /// addresses, if `packet` is one.
+    fn syn_port(&self, packet: &[u8]) -> Option<u16> {
+        let (dst, tcp): (IpAddr, &[u8]) = match packet.first()? >> 4 {
+            4 => {
+                let ihl = usize::from(packet.first()? & 0x0f) * 4;
+                if *packet.get(9)? != 6 || ihl < 20 {
+                    return None;
+                }
+                let d: [u8; 4] = packet.get(16..20)?.try_into().ok()?;
+                (IpAddr::from(d), packet.get(ihl..)?)
+            }
+            6 => {
+                if *packet.get(6)? != 6 {
+                    return None;
+                }
+                let d: [u8; 16] = packet.get(24..40)?.try_into().ok()?;
+                (IpAddr::from(d), packet.get(40..)?)
+            }
+            _ => return None,
+        };
+        let flags = *tcp.get(13)?;
+        let syn_only = flags & 0x02 != 0 && flags & 0x10 == 0;
+        (syn_only && self.addrs.contains(&dst)).then(|| u16::from_be_bytes([tcp[2], tcp[3]]))
+    }
+
+    /// Funds a listening socket for `port` (a SYN is about to arrive), if a
+    /// listener there has none, room in its backlog, and budget.
+    fn arm_listener(&mut self, port: u16) {
+        let Some(id) = self.socks.iter().find_map(|(&id, s)| match s {
+            Sock::Listener { port: p, listening: None, ready, backlog } if *p == port && ready.len() < *backlog => Some(id),
+            _ => None,
+        }) else {
+            return;
+        };
+        if let Ok(h) = self.new_listening(port) {
+            if let Some(Sock::Listener { listening, .. }) = self.socks.get_mut(&id) {
+                *listening = Some(h);
+            }
+        }
+    }
+
+    /// Moves connected listener sockets to the accept queue, and frees
+    /// listening sockets no connection attempt is pending for.
     fn service_listeners(&mut self) {
-        let mut rearm = Vec::new();
         let mut dead = Vec::new();
-        for (&id, s) in self.socks.iter_mut() {
+        let idle_ok = self.dev.inbound.is_empty();
+        for s in self.socks.values_mut() {
             if let Sock::Listener { listening, ready, backlog, .. } = s {
                 // Connections reset before being accepted: readiness must
                 // only report live ones.
@@ -550,31 +605,26 @@ impl Netstack {
                     }
                     alive
                 });
-                match *listening {
-                    Some(h) => {
-                        let st = self.sockets.get::<tcp::Socket>(h).state();
-                        if st != tcp::State::Listen && st != tcp::State::SynReceived && ready.len() < *backlog {
-                            ready.push_back(h);
+                let Some(h) = *listening else { continue };
+                match self.sockets.get::<tcp::Socket>(h).state() {
+                    tcp::State::SynReceived => {}
+                    // Nothing pending (or the attempt was reset).
+                    tcp::State::Listen => {
+                        if idle_ok {
+                            dead.push(h);
                             *listening = None;
-                            rearm.push(id);
                         }
                     }
-                    // Unfunded earlier: try again.
-                    None => rearm.push(id),
+                    _ if ready.len() < *backlog => {
+                        ready.push_back(h);
+                        *listening = None;
+                    }
+                    _ => {}
                 }
             }
         }
         for h in dead {
             self.remove_tcp(h);
-        }
-        for id in rearm {
-            let Some(Sock::Listener { port, .. }) = self.socks.get(&id) else { continue };
-            let port = *port;
-            if let Ok(h) = self.new_listening(port) {
-                if let Some(Sock::Listener { listening, .. }) = self.socks.get_mut(&id) {
-                    *listening = Some(h);
-                }
-            }
         }
     }
 
@@ -971,6 +1021,36 @@ mod tests {
             assert!(n.peer_addr(s).is_some(), "open ones are never evicted");
         }
         assert!(n.buffer_usage() <= BUDGET);
+    }
+
+    #[test]
+    fn idle_listeners_hold_no_buffers() {
+        let (a_ip, b_ip): (IpAddr, IpAddr) = ("100.64.0.1".parse().unwrap(), "100.64.0.2".parse().unwrap());
+        let mut now = Instant::from_millis(0);
+        let (mut a, mut b) = (Netstack::new(now), Netstack::new(now));
+        a.set_addresses(&[a_ip]);
+        b.set_addresses(&[b_ip]);
+        let listener = b.tcp_listen(80, 4).unwrap();
+        b.poll(now);
+        assert_eq!(b.buffer_usage(), 0, "listening alone costs nothing");
+        for round in 0..3 {
+            let client = a.tcp_connect(SocketAddr::new(b_ip, 80)).unwrap();
+            exchange(&mut a, &mut b, &mut now, 200);
+            let (server, _) = b.tcp_accept(listener).unwrap_or_else(|_| panic!("round {round}: accepted"));
+            assert_eq!(a.send(client, b"hi").unwrap(), 2);
+            exchange(&mut a, &mut b, &mut now, 200);
+            let mut buf = [0u8; 8];
+            assert_eq!(b.recv(server, &mut buf).unwrap(), 2);
+            b.close(server);
+            a.close(client);
+            exchange(&mut a, &mut b, &mut now, 200);
+            assert_eq!(b.buffer_usage(), 0, "round {round}: back to nothing once closed");
+        }
+        // No listener on the port: refused, nothing allocated.
+        let refused = a.tcp_connect(SocketAddr::new(b_ip, 81)).unwrap();
+        exchange(&mut a, &mut b, &mut now, 200);
+        assert!(a.readiness(refused).hup);
+        assert_eq!(b.buffer_usage(), 0);
     }
 
     #[test]
