@@ -86,6 +86,7 @@ namespace ams::bsd_mitm {
         constexpr int WireEIO = 5;
         constexpr int WireENetUnreach = 101;  // tailnet traffic while the user paused Tailscale
         constexpr int WireNonBlock = 0x800;
+        constexpr int WireENoBufs = 105;
 
         // ---- the real bsd:u ------------------------------------------------
 
@@ -94,7 +95,13 @@ namespace ams::bsd_mitm {
         // blocked in on one of its own sessions.
         class HorizonBackend final : public ::tsnx::Backend {
             public:
-                explicit HorizonBackend(::Service *srv) : m_srv(srv) {}
+                // The clone of the client's session is made on first use: every
+                // real bsd session counts against the socket service's limit
+                // (shared by all processes), and some sessions never need one.
+                explicit HorizonBackend(std::shared_ptr<::Service> parent) : m_parent(std::move(parent)) {}
+                ~HorizonBackend() override {
+                    if (m_cloned) serviceClose(std::addressof(m_srv));
+                }
 
                 VResult Socket(int domain, int type, int protocol) override {
                     const struct { s32 domain, type, protocol; } in = {domain, type, protocol};
@@ -193,10 +200,19 @@ namespace ams::bsd_mitm {
                     }
                 };
 
+                // Out of line: inlined into every call it costs ~7 KB each.
+                [[gnu::noinline]] ::Service *Srv() {
+                    std::scoped_lock lk(m_clone_mutex);
+                    if (!m_cloned && R_SUCCEEDED(serviceClone(m_parent.get(), std::addressof(m_srv)))) m_cloned = true;
+                    return m_cloned ? std::addressof(m_srv) : nullptr;
+                }
+
                 template<typename In>
                 VResult Call(u32 id, const In &in, const Params &p) {
                     struct { s32 ret, err; } out = {};
-                    if (serviceDispatchImpl(m_srv, id, std::addressof(in), sizeof(in), std::addressof(out), sizeof(out), p.d) != 0) {
+                    ::Service *srv = Srv();
+                    if (!srv) return {-1, WireENoBufs};
+                    if (serviceDispatchImpl(srv, id, std::addressof(in), sizeof(in), std::addressof(out), sizeof(out), p.d) != 0) {
                         return {-1, WireEIO};
                     }
                     return {out.ret, out.ret < 0 ? out.err : 0};
@@ -206,14 +222,19 @@ namespace ams::bsd_mitm {
                 template<typename In>
                 VResult CallLen(u32 id, const In &in, const Params &p, socklen_t *len) {
                     struct { s32 ret, err; u32 len; } out = {};
-                    if (serviceDispatchImpl(m_srv, id, std::addressof(in), sizeof(in), std::addressof(out), sizeof(out), p.d) != 0) {
+                    ::Service *srv = Srv();
+                    if (!srv) return {-1, WireENoBufs};
+                    if (serviceDispatchImpl(srv, id, std::addressof(in), sizeof(in), std::addressof(out), sizeof(out), p.d) != 0) {
                         return {-1, WireEIO};
                     }
                     if (out.ret >= 0 && len) *len = out.len;
                     return {out.ret, out.ret < 0 ? out.err : 0};
                 }
 
-                ::Service *m_srv;
+                std::shared_ptr<::Service> m_parent;
+                os::SdkMutex m_clone_mutex;
+                ::Service m_srv = {};
+                bool m_cloned = false;
         };
 
         bool ProcessAlive(u64 pid) {
@@ -303,13 +324,11 @@ namespace ams::bsd_mitm {
         // ---- per-client state ----------------------------------------------
 
         struct ClientState {
-            ::Service fwd = {};
             std::unique_ptr<HorizonBackend> backend;
             std::unique_ptr<::tsnx::VSock> vsock;
 
             ~ClientState() {
                 if (vsock) vsock->CloseAll();
-                serviceClose(std::addressof(fwd));
             }
         };
 
@@ -323,11 +342,7 @@ namespace ams::bsd_mitm {
         public:
             BsdMitmService(std::shared_ptr<::Service> &&s, const sm::MitmProcessInfo &c) : MitmServiceImplBase(std::move(s), c) {
                 auto st = std::make_unique<ClientState>();
-                if (R_FAILED(serviceClone(m_forward_service.get(), std::addressof(st->fwd)))) {
-                    Log("bsd mitm: cannot clone session of program %016lx; forwarding everything", m_client_info.program_id.value);
-                    return;
-                }
-                st->backend = std::make_unique<HorizonBackend>(std::addressof(st->fwd));
+                st->backend = std::make_unique<HorizonBackend>(m_forward_service);
                 st->vsock = std::make_unique<::tsnx::VSock>(*st->backend, *g_runtime);
                 const u64 pid = m_client_info.process_id.value;
                 st->vsock->SetAliveCheck([pid] { return ProcessAlive(pid); });
@@ -811,6 +826,20 @@ namespace ams::bsd_mitm {
         if (g_installed_s) {
             g_installed_s = false;
             static_cast<void>(sm::mitm::UninstallMitm(BsdSName));
+            // sys-ftpd's sockets go through us and die with this process:
+            // restart it so it reconnects directly and FTP keeps working.
+            // No logging here: this also runs from the crash handler, which
+            // may hold the log lock.
+            if (R_SUCCEEDED(pmshellInitialize())) {
+                if (R_SUCCEEDED(pmshellTerminateProgram(SysFtpdProgramId))) {
+                    const NcmProgramLocation loc = {.program_id = SysFtpdProgramId, .storageID = NcmStorageId_None};
+                    u64 pid = 0;
+                    for (int i = 0; i < 20 && R_FAILED(pmshellLaunchProgram(0, std::addressof(loc), std::addressof(pid))); i++) {
+                        svcSleepThread(100'000'000);
+                    }
+                }
+                pmshellExit();
+            }
         }
     }
 

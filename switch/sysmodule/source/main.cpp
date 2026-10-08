@@ -97,7 +97,10 @@ namespace ams {
             .udp_tx_buf_size = 0x2000,
             .udp_rx_buf_size = 0xC000,
             .sb_efficiency = 3,
-            .num_bsd_sessions = 3,
+            // Each counts against the socket service's session limit, which
+            // every process shares: two cover the engine's long poll plus
+            // log writes from other threads.
+            .num_bsd_sessions = 2,
             .bsd_service_type = BsdServiceType_System,
         };
 
@@ -525,7 +528,13 @@ namespace ams {
                     if (!g_power_runtime->IsSuspended()) Log("power: sockets not closed in time; continuing");
                     suspended = true;
                 }
-                if (suspended && state == psc::PmState_ShutdownReady) static_cast<void>(fs::DeleteFile(SleepingPath));
+                if (state == psc::PmState_ShutdownReady) {
+                    // A clean power-off or reboot: this boot ended normally, so
+                    // it mustn't count towards the crash guard (people reboot
+                    // a lot while setting things up).
+                    static_cast<void>(fs::DeleteFile(StartingPath));
+                    if (suspended) static_cast<void>(fs::DeleteFile(SleepingPath));
+                }
                 if (const Result rc = g_pm_module.Acknowledge(state, ResultSuccess()); R_FAILED(rc)) Log("power: acknowledge failed: 0x%x", rc.GetValue());
                 // Wake steps: from "essential services awake" up to full awake
                 // (a light sleep goes straight back to full awake).
@@ -617,14 +626,14 @@ namespace ams {
             // The console went to sleep with us running and never woke us.
             static_cast<void>(fs::DeleteFile(SleepingPath));
             const int failures = (ReadWholeFile(SleepFailuresPath, buf, sizeof buf) > 0 ? std::atoi(buf) : 0) + 1;
-            if (failures >= MaxSleepFailures) return give_up("the console failed to wake from sleep twice in a row with it running");
+            if (failures >= MaxSleepFailures) return give_up("the console didn't wake from sleep twice in a row");
             Log("warning: the last sleep never woke up (%d of %d before disabling)", failures, MaxSleepFailures);
             WriteWholeFile(SleepFailuresPath, buf, util::SNPrintf(buf, sizeof buf, "%d", failures));
         }
 
         if (armTicksToNs(armGetSystemTick()) > BootStartWithinNs) return true;  // started by hand
         const int count = ReadWholeFile(StartingPath, buf, sizeof buf) > 0 ? std::atoi(buf) : 0;
-        if (count >= MaxUnhealthyStarts) return give_up("several boots in a row ended within 3 minutes of starting");
+        if (count >= MaxUnhealthyStarts) return give_up("3 boots in a row crashed within 3 minutes");
         WriteWholeFile(StartingPath, buf, util::SNPrintf(buf, sizeof buf, "%d", count + 1));
         return true;
     }
@@ -822,8 +831,9 @@ namespace ams {
         static char line[640];
         const u64 base = ctx->module_base;
         auto off = [base](u64 a) { return a >= base ? a - base : a; };
-        int n = util::SNPrintf(line, sizeof line, "CRASH desc 0x%x: pc +0x%lx lr +0x%lx far 0x%lx sp 0x%lx base 0x%lx; trace",
-                               ctx->error_desc, off(ctx->pc), off(ctx->lr), ctx->far, ctx->sp, base);
+        // x0/x1: an abort's failing Result is usually among them.
+        int n = util::SNPrintf(line, sizeof line, "CRASH desc 0x%x: pc +0x%lx lr +0x%lx far 0x%lx sp 0x%lx base 0x%lx x0 0x%lx x1 0x%lx; trace",
+                               ctx->error_desc, off(ctx->pc), off(ctx->lr), ctx->far, ctx->sp, base, ctx->gprs[0], ctx->gprs[1]);
         for (u64 i = 0; i < ctx->stack_trace_size && i < 12 && n < static_cast<int>(sizeof line) - 24; i++) {
             n += util::SNPrintf(line + n, sizeof line - n, " +0x%lx", off(ctx->stack_trace[i]));
         }

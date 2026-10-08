@@ -1,0 +1,25 @@
+diff --git a/libraries/libstratosphere/source/sf/hipc/sf_hipc_server_domain_session_manager.cpp b/libraries/libstratosphere/source/sf/hipc/sf_hipc_server_domain_session_manager.cpp
+index c1e6bdb..cdcda1d 100644
+--- a/libraries/libstratosphere/source/sf/hipc/sf_hipc_server_domain_session_manager.cpp
++++ b/libraries/libstratosphere/source/sf/hipc/sf_hipc_server_domain_session_manager.cpp
+@@ -49,8 +49,18 @@ namespace ams::sf::hipc {
+ 
+                         /* Clone the forward service. */
+                         std::shared_ptr<::Service> new_forward_service = ServerSession::CreateForwardService();
+-                        R_ABORT_UNLESS(serviceClone(util::GetReference(m_session->m_forward_service).get(), new_forward_service.get()));
+-                        R_ABORT_UNLESS(tagged_manager->RegisterMitmSession(server_handle, std::move(clone), std::move(new_forward_service)));
++                        /* tailscale-nx: fail the clone instead of aborting the whole MITM process when the real */
++                        /* service refuses it (e.g. out of sessions) or our session slots are full; the client */
++                        /* gets an error, everyone else keeps working. The forward service closes itself. */
++                        Result rc = serviceClone(util::GetReference(m_session->m_forward_service).get(), new_forward_service.get());
++                        if (R_SUCCEEDED(rc)) {
++                            rc = tagged_manager->RegisterMitmSession(server_handle, std::move(clone), std::move(new_forward_service));
++                        }
++                        if (R_FAILED(rc)) {
++                            os::CloseNativeHandle(server_handle);
++                            os::CloseNativeHandle(client_handle);
++                            R_RETURN(rc);
++                        }
+                     }
+                     #endif
+ 

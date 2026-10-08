@@ -6,7 +6,7 @@ exclude = ["third_party"]
 [workspace.package]
 edition = "2021"
 license = "BSD-3-Clause"
-version = "1.0.0"
+version = "1.0.1"
 
 [workspace.dependencies]
 tsnx-core = { path = "crates/tsnx-core", default-features = false }

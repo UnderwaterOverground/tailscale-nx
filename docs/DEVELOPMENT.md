@@ -122,7 +122,7 @@ dot_clean -m /Volumes/<SD card>
 extract to the SD card root). The version comes from `Cargo.toml` and must
 match `switch/overlay/Makefile` and `switch/sysmodule/res/app.json`.
 Pushing a `v*` tag builds and publishes the same zip on GitHub
-(`.github/workflows/release.yml`).
+(`.github/workflows/publish.yml`).
 
 ## Notes and findings
 

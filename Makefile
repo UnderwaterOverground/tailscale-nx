@@ -52,8 +52,15 @@ nro: rust-switch
 # work from inside Docker Desktop.
 # Atmosphère's libstratosphere (pinned to the console's Atmosphère, 1.12.0).
 LIBSTRAT := third_party/Atmosphere/libraries/libstratosphere/lib/nintendo_nx_arm64_armv8a/release/libstratosphere.a
+# Fixes to Atmosphère's libraries that tailscale-nx needs (see patches/),
+# applied to the submodule before building; a changed patch rebuilds.
+ATMOSPHERE_PATCHES := $(sort $(wildcard patches/atmosphere-*.patch))
 libstratosphere: $(LIBSTRAT)
-$(LIBSTRAT):
+$(LIBSTRAT): $(ATMOSPHERE_PATCHES)
+	@for p in $(ATMOSPHERE_PATCHES); do \
+	  git -C third_party/Atmosphere apply --reverse --check ../../$$p 2>/dev/null || \
+	  git -C third_party/Atmosphere apply ../../$$p || exit 1; \
+	done
 	$(SW) make -C third_party/Atmosphere/libraries/libstratosphere -j8
 
 sysmodule: rust-switch $(LIBSTRAT)

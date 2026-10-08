@@ -1234,7 +1234,7 @@ dependencies = [
 
 [[package]]
 name = "tsnx-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "base64",
  "blake2",
@@ -1266,7 +1266,7 @@ dependencies = [
 
 [[package]]
 name = "tsnx-ffi"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "log",
  "tsnx-core",
@@ -1274,7 +1274,7 @@ dependencies = [
 
 [[package]]
 name = "tsnx-host"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "env_logger",
  "log",

@@ -18,6 +18,15 @@ namespace {
     Service g_ctl;
     bool g_have_ctl = false;
 
+    // Atmosphère's sm makes a request for a service nobody has registered
+    // wait until someone does (for boot ordering), so the overlay would hang
+    // when tailscale-nx isn't running: ask whether it exists first.
+    bool ServiceExists(const char *name) {
+        u8 has = 0;
+        const SmServiceName sn = smEncodeName(name);
+        return R_SUCCEEDED(tipcDispatchInOut(smGetServiceSessionTipc(), 65100, sn, has)) && (has & 1);
+    }
+
     bool CtlGetStatus(TsnxCtlStatus *out) {
         return g_have_ctl && R_SUCCEEDED(serviceDispatchOut(&g_ctl, 0, *out));
     }
@@ -43,6 +52,40 @@ namespace {
 
     TsnxCtlStatus g_status = {};
     bool g_status_ok = false;
+
+    // Why the sysmodule isn't running, read from the SD card when the overlay
+    // opens (the crash guard's file, or a missing boot flag).
+    constexpr const char CrashedPath[] = "sdmc:/config/tailscale-nx/crashed";
+    constexpr const char Boot2Path[] = "sdmc:/atmosphere/contents/4200000000005453/flags/boot2.flag";
+    char g_crashed[160] = {};   // first line of the crash guard's reason
+    bool g_no_boot_flag = false;
+    bool g_turned_back_on = false;
+
+    void ReadWhyNotRunning() {
+        tsl::hlp::doWithSDCardHandle([] {
+            g_crashed[0] = 0;
+            if (FILE *f = std::fopen(CrashedPath, "r")) {
+                if (!std::fgets(g_crashed, sizeof g_crashed, f) || !g_crashed[0]) std::snprintf(g_crashed, sizeof g_crashed, "repeated failures");
+                g_crashed[std::strcspn(g_crashed, "\r\n")] = 0;
+                std::fclose(f);
+            }
+            FILE *b = std::fopen(Boot2Path, "r");
+            g_no_boot_flag = b == nullptr;
+            if (b) std::fclose(b);
+        });
+    }
+
+    // Clears the crash guard so the next boot starts tailscale-nx again.
+    void TurnBackOn() {
+        tsl::hlp::doWithSDCardHandle([] {
+            for (const char *p : {CrashedPath, "sdmc:/config/tailscale-nx/starting", "sdmc:/config/tailscale-nx/sleep_failures",
+                                  "sdmc:/config/tailscale-nx/sleeping"}) {
+                std::remove(p);
+            }
+        });
+        g_crashed[0] = 0;
+        g_turned_back_on = true;
+    }
     char g_login_url[256] = {};
     char g_last_error[192] = {};
 
@@ -103,8 +146,33 @@ namespace {
         r->drawString(state, false, x + 20, y + 40, 30, r->a(color));
         char line[128];
         if (!g_status_ok) {
-            r->drawString("The tailscale-nx sysmodule isn't running.", false, x + 20, y + 75, 17, r->a(Grey));
-            r->drawString("Turn on its boot setting in Sysmodules, then restart.", false, x + 20, y + 100, 17, r->a(Grey));
+            if (g_turned_back_on) {
+                r->drawString("Turned back on. Restart the console", false, x + 20, y + 75, 17, r->a(White));
+                r->drawString("to start tailscale-nx.", false, x + 20, y + 100, 17, r->a(White));
+            } else if (g_crashed[0]) {
+                // "tailscale-nx stopped itself: <why>." -> show the reason.
+                const char *why = std::strstr(g_crashed, ": ");
+                why = why ? why + 2 : g_crashed;
+                r->drawString("It turned itself off after failures:", false, x + 20, y + 75, 17, r->a(Grey));
+                // Two lines at most, broken at a space.
+                char first[64], second[96] = "";
+                size_t cut = std::strlen(why);
+                if (cut > 40) {
+                    cut = 40;
+                    while (cut > 0 && why[cut] != ' ') cut--;
+                    if (cut == 0) cut = 40;
+                }
+                std::snprintf(first, sizeof first, "%.*s", static_cast<int>(cut), why);
+                if (why[cut]) std::snprintf(second, sizeof second, "%s", why + cut + (why[cut] == ' '));
+                r->drawString(first, false, x + 20, y + 98, 15, r->a(Grey));
+                if (second[0]) r->drawString(second, false, x + 20, y + 116, 15, r->a(Grey));
+            } else if (g_no_boot_flag) {
+                r->drawString("The tailscale-nx sysmodule isn't running.", false, x + 20, y + 75, 17, r->a(Grey));
+                r->drawString("Turn on its boot setting in Sysmodules, then restart.", false, x + 20, y + 100, 17, r->a(Grey));
+            } else {
+                r->drawString("The tailscale-nx sysmodule isn't running.", false, x + 20, y + 75, 17, r->a(Grey));
+                r->drawString("Restart the console to start it.", false, x + 20, y + 100, 17, r->a(Grey));
+            }
             return;
         }
         const u8 *ip = g_status.ipv4;
@@ -198,6 +266,16 @@ namespace {
                 auto *frame = new tsl::elm::OverlayFrame("Tailscale", "tailscale-nx " APP_VERSION);
                 auto *list = new tsl::elm::List();
                 list->addItem(new tsl::elm::CustomDrawer(DrawStatus), 120);
+                if (!g_status_ok) ReadWhyNotRunning();
+                if (!g_status_ok && g_crashed[0]) {
+                    auto *again = new tsl::elm::ListItem("Turn back on");
+                    again->setClickListener([](u64 keys) {
+                        if (!(keys & HidNpadButton_A)) return false;
+                        TurnBackOn();
+                        return true;
+                    });
+                    list->addItem(again);
+                }
 
                 m_toggle = new tsl::elm::ToggleListItem("Tailscale", !(g_status_ok && g_status.state == TSNX_CTL_PAUSED));
                 m_toggle->setStateChangedListener([](bool on) {
@@ -234,7 +312,7 @@ namespace {
     class TailscaleOverlay : public tsl::Overlay {
         public:
             void initServices() override {
-                g_have_ctl = R_SUCCEEDED(smGetService(&g_ctl, TSNX_CTL_SERVICE));
+                g_have_ctl = ServiceExists(TSNX_CTL_SERVICE) && R_SUCCEEDED(smGetService(&g_ctl, TSNX_CTL_SERVICE));
             }
 
             void exitServices() override {

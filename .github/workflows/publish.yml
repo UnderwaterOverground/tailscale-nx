@@ -1,7 +1,7 @@
 # Pushing a tag like v1.0.0 builds the release zip in the same Docker image as
 # local builds and attaches it to a draft GitHub release. Review the draft,
 # then publish it.
-name: Release
+name: Publish
 
 on:
   push:

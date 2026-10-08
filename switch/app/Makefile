@@ -45,7 +45,7 @@ INCLUDES	:=	include ../../crates/tsnx-ffi/include ../../native/driver
 #ROMFS	:=	romfs
 APP_TITLE	:=	tailscale-nx
 APP_AUTHOR	:=	UnderwaterOverground
-APP_VERSION	:=	1.0.0
+APP_VERSION	:=	1.0.1
 
 #---------------------------------------------------------------------------------
 # options for code generation
