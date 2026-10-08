@@ -707,8 +707,14 @@ namespace ams {
             return;
         }
 
-        // Boot2 runs before Wi-Fi is up.
-        while (!NetworkUp()) os::SleepThread(TimeSpan::FromSeconds(1));
+        // Boot2 runs before Wi-Fi is up (about 25 s before, typically).
+        // nifm only signals events for network requests of our own, which
+        // would change how it manages the connection, so poll instead: one
+        // cheap IPC per 100 ms, so we start soon after Wi-Fi does.
+        if (!NetworkUp()) {
+            Log("waiting for the network");
+            while (!NetworkUp()) os::SleepThread(TimeSpan::FromMilliSeconds(100));
+        }
         u32 ip = CurrentIp();
         Log("network up, local address %s", inet_ntoa(in_addr{ip}));
         SetLocalNet(ip);
@@ -791,9 +797,11 @@ namespace ams {
 
         // Homebrew sockets to tailnet addresses go through the engine.
         // The log socket goes down and up with the engine's own (sleep).
-        rt->SetSuspendHooks([] { CloseUdpLogSocket(); }, [] {
+        // Coming back counts as having been offline (see the loop below).
+        rt->SetSuspendHooks([] { CloseUdpLogSocket(); }, [&ip] {
             g_tailnet_log_hold_until_ns = armTicksToNs(armGetSystemTick()) + 10'000'000'000ull;
             OpenUdpLogSocket();
+            ip = 0;
         });
         StartPowerHandling(*rt);
         // mitm=homebrew (default), off, or homebrew,sys-ftpd; mitm_titles
@@ -808,7 +816,11 @@ namespace ams {
         ctl::Start();
 
         // Engine loop on this thread; housekeeping between rounds. Re-detect
-        // our address after Wi-Fi changes (roaming, sleep/wake).
+        // our address after Wi-Fi changes (roaming, sleep/wake): every 5 s,
+        // or 250 ms while offline (a wake usually finds Wi-Fi still down).
+        // Back online, control and DERP retry at once rather than after the
+        // backoff their failures while offline grew, and the LAN endpoint is
+        // refreshed.
         u64 last_check = armTicksToNs(armGetSystemTick());
         u64 last_heap_log = 0;
         const u64 started = armTicksToNs(armGetSystemTick());
@@ -842,11 +854,12 @@ namespace ams {
                 hosts_dirty_since = 0;
                 hosts::Update(engine);
             }
-            if (now - last_check > 5'000'000'000ull) {
+            if (now - last_check > (ip ? 5'000'000'000ull : 250'000'000ull)) {
                 last_check = now;
                 const u32 cur = NetworkUp() ? CurrentIp() : 0;
                 if (cur != ip) {
                     Log("local address changed: %s", cur ? inet_ntoa(in_addr{cur}) : "(offline)");
+                    if (cur && !ip) tsnx_engine_network_up(engine, tsnx_driver_now_ns());
                     ip = cur;
                     SetLocalNet(cur);
                     if (cur) tsnx_driver_refresh_endpoints(d);

@@ -243,6 +243,17 @@ impl ControlClient {
         self.start();
     }
 
+    /// The network came back: if we're waiting out a backoff (which failures
+    /// while offline grew), reset it and reconnect now. A session that is up
+    /// or being set up is left alone, so repeated calls are harmless.
+    pub fn retry_now(&mut self, now: Instant) {
+        self.now = now;
+        if matches!(self.phase, Phase::Idle { .. }) {
+            self.backoff.reset();
+            self.start();
+        }
+    }
+
     /// Updates what we tell the server about our network position (home
     /// DERP region, direct UDP endpoints) and pushes it if a session is up.
     pub fn set_net_info(&mut self, preferred_derp: Option<u32>, endpoints: Vec<core::net::SocketAddr>) {
@@ -657,4 +668,58 @@ struct RegisterResponse {
     #[serde(rename = "AuthURL")]
     auth_url: String,
     error: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client(now: Instant) -> ControlClient {
+        let cfg = ControlConfig { url: "http://control.test".into(), auth_key: None, hostname: "test".into(), extra_roots: Vec::new() };
+        let keys = Keys { machine_private: [1; 32], node_private: [2; 32], disco_public: [3; 32] };
+        ControlClient::new(cfg, keys, now).unwrap()
+    }
+
+    fn drain(c: &mut ControlClient) -> Vec<Io> {
+        core::iter::from_fn(|| c.poll_io()).collect()
+    }
+
+    #[test]
+    fn retry_now_skips_a_grown_backoff() {
+        let mut now = Instant::from_nanos(1_000_000_000);
+        let mut c = client(now);
+        // Offline: every attempt fails at once (1 s, 2 s, 4 s, 8 s apart).
+        for _ in 0..4 {
+            now = c.next_deadline();
+            c.handle_timeout(now);
+            let Some(Io::Connect { id, .. }) = drain(&mut c).into_iter().next() else { panic!("no connect") };
+            c.on_closed(id, now);
+            drain(&mut c);
+        }
+        assert_eq!(c.next_deadline(), now + Duration::from_secs(8));
+
+        let back = now + Duration::from_millis(500);
+        c.retry_now(back);
+        assert!(matches!(drain(&mut c).as_slice(), [Io::Connect { .. }]));
+        assert_eq!(c.backoff.clone().next_delay(), Duration::from_secs(1));
+        // Already connecting: a second call changes nothing.
+        c.retry_now(back);
+        assert!(drain(&mut c).is_empty());
+    }
+
+    #[test]
+    fn retry_now_leaves_a_live_session_alone() {
+        let now = Instant::from_nanos(1_000_000_000);
+        let mut c = client(now);
+        let conn = ControlConn::new("control.test", &[1; 32], &[4; 32], &[5; 32], CAPABILITY_VERSION).unwrap();
+        c.phase = Phase::Session { id: 7, stream: None, conn, step: Step::Polling { stream: 1, status: 200, buf: Vec::new() } };
+        c.backoff.next_delay();
+        let deadline = c.next_deadline();
+
+        c.retry_now(now + Duration::from_secs(1));
+        assert!(c.is_polling());
+        assert!(drain(&mut c).is_empty());
+        assert_eq!(c.next_deadline(), deadline);
+        assert_eq!(c.backoff.clone().next_delay(), Duration::from_secs(2));
+    }
 }

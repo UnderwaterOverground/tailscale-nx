@@ -125,6 +125,9 @@ void tsnx_engine_udp(TsnxEngine *e, const TsnxAddr *src, const uint8_t *data, si
 // Local UDP endpoints (interface address + bound port) to advertise to peers.
 void tsnx_engine_set_local_endpoints(TsnxEngine *e, const TsnxAddr *eps, size_t n, uint64_t now_ns);
 void tsnx_engine_timeout(TsnxEngine *e, uint64_t now_ns);
+// The network came back (offline -> online): control and DERP retry now
+// instead of waiting out their backoff. Leaves connections that are up alone.
+void tsnx_engine_network_up(TsnxEngine *e, uint64_t now_ns);
 uint64_t tsnx_engine_next_deadline(TsnxEngine *e);
 
 // ---- Overlay sockets (tailnet side) -------------------------------------------
