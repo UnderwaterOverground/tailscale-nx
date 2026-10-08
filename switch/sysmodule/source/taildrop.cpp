@@ -1,6 +1,8 @@
 // See taildrop.hpp.
 #include <stratosphere.hpp>
 
+#include <cstring>
+
 #include "log.hpp"
 #include "status.hpp"
 #include "taildrop.hpp"
@@ -87,9 +89,33 @@ namespace ams::taildrop {
             status::AnnounceFile(saved != 0, name, bytes, from, why);
         }
 
+        // Transfers cut short by a power loss or a stop leave <name>.partial
+        // behind: remove them (a few per boot is plenty).
+        void RemoveStalePartials() {
+            for (int round = 0; round < 16; round++) {
+                fs::DirectoryHandle dir;
+                if (R_FAILED(fs::OpenDirectory(std::addressof(dir), Dir, fs::OpenDirectoryMode_File))) return;
+                char path[TSNX_DROP_PATH_MAX] = {};
+                fs::DirectoryEntry entry;
+                s64 got = 0;
+                while (R_SUCCEEDED(fs::ReadDirectory(std::addressof(got), std::addressof(entry), dir, 1)) && got == 1) {
+                    const size_t len = std::strlen(entry.name);
+                    if (len > 8 && std::strcmp(entry.name + len - 8, ".partial") == 0) {
+                        util::SNPrintf(path, sizeof path, "%s/%s", Dir, entry.name);
+                        break;
+                    }
+                }
+                fs::CloseDirectory(dir);
+                if (!path[0]) return;
+                Log("taildrop: removing unfinished %s", path);
+                if (R_FAILED(fs::DeleteFile(path))) return;
+            }
+        }
+
     }
 
     bool Start(TsnxDriver *driver) {
+        RemoveStalePartials();
         const TsnxDropSink sink = tsnx_drop_dir(std::addressof(g_dir), std::addressof(SdFs), Dir, OnResult, nullptr);
         if (tsnx_driver_set_taildrop(driver, std::addressof(sink), Port) != 0) {
             Log("taildrop: cannot listen on port %u", Port);

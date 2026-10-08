@@ -1,15 +1,20 @@
 // tsnx:ctl, the tailscale-nx sysmodule's control service (status, login
-// link, pause). Shared by the sysmodule and its clients (the overlay).
+// link, pause, stop). Shared by the sysmodule and its clients (the overlay).
 //
 //   cmd 0  GetStatus()                -> TsnxCtlStatus (raw)
 //   cmd 1  GetLoginUrl(out buffer)    -> u32 length (0: none)
 //   cmd 2  SetPaused(u8 paused)
 //   cmd 3  GetLastError(out buffer)   -> u32 length (0: none)
+//   cmd 4  Stop()                     -> u32 TSNX_CTL_STOP_*, u32 detail
+//          (version 2+). Ends the process unless that could disturb the
+//          console or an app; the reply says why not. On TSNX_CTL_STOP_OK
+//          the process exits shortly after replying: close the session
+//          and wait for it to be gone before starting it again.
 #pragma once
 #include <stdint.h>
 
 #define TSNX_CTL_SERVICE "tsnx:ctl"
-#define TSNX_CTL_VERSION 1
+#define TSNX_CTL_VERSION 2
 
 enum {
     TSNX_CTL_STARTING = 0,     // waiting for the network / starting up
@@ -17,6 +22,14 @@ enum {
     TSNX_CTL_CONNECTING = 2,   // authorized, joining the tailnet
     TSNX_CTL_CONNECTED = 3,
     TSNX_CTL_PAUSED = 4,       // switched off by the user (survives reboots)
+    TSNX_CTL_STOPPING = 5,     // stopped from the overlay; exiting (or idle until restart)
+};
+
+enum {
+    TSNX_CTL_STOP_OK = 0,        // exiting now
+    TSNX_CTL_STOP_HOMEBREW = 1,  // refused: homebrew has sockets through us (detail: sessions)
+    TSNX_CTL_STOP_BUSY = 2,      // refused: a sleep or wake, or setup, is under way; try again
+    TSNX_CTL_STOP_FAILED = 3,    // couldn't finish safely: stays idle until the console restarts
 };
 
 enum {

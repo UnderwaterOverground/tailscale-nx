@@ -16,7 +16,7 @@ machine, without a console), and what we learned along the way.
 | `native/vsock` | Socket virtualization. It decides per socket between the real stack and the tailnet, splits poll/select, and handles blocking semantics. The MITM is built on it. |
 | `native/interpose` | `libtsnx_interpose`: runs unmodified programs through `native/vsock` (DYLD on macOS, LD_PRELOAD on Linux), plus `vsock-test` |
 | `switch/sysmodule` | The boot2 sysmodule (libstratosphere): engine, `bsd:u` MITM (plus `bsd:s` for sys-ftpd), MagicDNS hosts file, the `tsnx:ctl` status service, sleep handling and the crash guard |
-| `switch/overlay` | Tesla/Ultrahand overlay: status, pause switch, login QR code |
+| `switch/overlay` | Tesla/Ultrahand overlay: status, pause switch, stop/start, login QR code |
 | `switch/app` | `tsnx-app.nro`: the engine in a homebrew app, with status, an echo self-test and a crypto benchmark (developer tool) |
 | `third_party/tailscale-rs` | Vendored, `no_std`-ported crates from tailscale-rs (BSD-3). See `VENDORED.md`. |
 | `e2e/` | Local tailnet: headscale (control, DERP, STUN) plus a stock `tailscaled` peer with TCP/UDP echo (port 7), HTTP (8080) and iperf3 (5201). `run-tests.sh` is the automated suite. |
@@ -89,8 +89,9 @@ Sysmodule loop (a console with sys-ftpd, reachable at `<switch ip>`):
 1. `make sysmodule` (and `make overlay`), then copy
    `switch/sysmodule/dist/atmosphere/contents/4200000000005453/exefs.nsp`
    (and `switch/overlay/tailscale-nx.ovl`) over FTP.
-2. Reboot. tailscale-nx can't be restarted while running: its `bsd:u`
-   MITM must outlive every client session.
+2. Reboot, or **Stop** and then **Start** in the overlay (close homebrew
+   first: the `bsd:u` MITM must outlive every client session, so Stop refuses
+   while any is open). The Sysmodules overlay must never kill it.
 3. Watch the log: set `log_udp=<your ip>:5514` in
    `config/tailscale-nx/config.ini` and run `nc -ul 5514`, or read
    `config/tailscale-nx/sysmodule.log(.1)`.

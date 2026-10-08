@@ -61,7 +61,8 @@ public:
     // own and idle without network I/O until Resume(). Independent reasons
     // (sleep, a user pause, ...) stack: I/O resumes once none is left.
     // Suspend returns once the sockets are closed (false: timed out).
-    enum SuspendReason : uint32_t { kSleep = 1, kPaused = 2 };
+    // Stop() while suspended ends the loop without reopening anything.
+    enum SuspendReason : uint32_t { kSleep = 1, kPaused = 2, kStopping = 4 };
     bool Suspend(SuspendReason why, std::chrono::milliseconds timeout);
     void Resume(SuspendReason why);
     // Before Run(): start suspended (no waiting; the loop honours it first).

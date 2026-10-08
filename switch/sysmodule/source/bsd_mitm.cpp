@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -88,6 +89,28 @@ namespace ams::bsd_mitm {
 
         bool IsListedTitle(u64 program_id) {
             return std::find(g_titles, g_titles + g_num_titles, program_id) != g_titles + g_num_titles;
+        }
+
+        // For a deliberate stop (PrepareStop): sessions alive now, and the
+        // sessions sm was told to send us versus those acknowledged. sm's
+        // queries arrive on libstratosphere's own query thread.
+        constinit os::SdkMutex g_query_mutex;
+        constinit bool g_stopping = false;  // answer "don't MITM" to everything
+        constinit u32 g_answered_yes = 0;   // under g_query_mutex
+        constinit std::atomic<u32> g_accepted = 0;
+        constinit std::atomic<s32> g_live_sessions = 0;
+        constinit std::atomic<s32> g_live_sys_ftpd_sessions = 0;
+
+        bool AnswerQuery(bool mitm) {
+            std::scoped_lock lk(g_query_mutex);
+            if (g_stopping) return false;
+            if (mitm) g_answered_yes++;
+            return mitm;
+        }
+
+        u32 PendingAcknowledgements() {
+            std::scoped_lock lk(g_query_mutex);
+            return g_answered_yes - g_accepted.load();
         }
 
         // bsd:u speaks Linux errno numbers and O_NONBLOCK = 0x800 (libnx
@@ -351,6 +374,8 @@ namespace ams::bsd_mitm {
 
         public:
             BsdMitmService(std::shared_ptr<::Service> &&s, const sm::MitmProcessInfo &c) : MitmServiceImplBase(std::move(s), c) {
+                g_live_sessions++;
+                if (m_client_info.program_id.value == SysFtpdProgramId) g_live_sys_ftpd_sessions++;
                 auto st = std::make_unique<ClientState>();
                 st->backend = std::make_unique<HorizonBackend>(m_forward_service);
                 st->vsock = std::make_unique<::tsnx::VSock>(*st->backend, *g_runtime);
@@ -361,10 +386,16 @@ namespace ams::bsd_mitm {
                 Log("bsd mitm: session from program %016lx (pid %lu)", m_client_info.program_id.value, pid);
             }
 
+            ~BsdMitmService() {
+                m_state.reset();  // its sockets close while the session still counts
+                if (m_client_info.program_id.value == SysFtpdProgramId) g_live_sys_ftpd_sessions--;
+                g_live_sessions--;
+            }
+
             static bool ShouldMitm(const sm::MitmProcessInfo &c) {
                 // sys-ftpd builds whose libnx prefers bsd:u come through here.
-                return (g_scope == Scope::Homebrew && (c.override_status.IsHbl() || IsListedTitle(c.program_id.value))) ||
-                       (g_sys_ftpd && c.program_id.value == SysFtpdProgramId);
+                return AnswerQuery((g_scope == Scope::Homebrew && (c.override_status.IsHbl() || IsListedTitle(c.program_id.value))) ||
+                                   (g_sys_ftpd && c.program_id.value == SysFtpdProgramId));
             }
 
         private:
@@ -647,6 +678,7 @@ namespace ams::bsd_mitm {
                     std::shared_ptr<::Service> fsrv;
                     sm::MitmProcessInfo client_info;
                     server->AcknowledgeMitmSession(std::addressof(fsrv), std::addressof(client_info));
+                    ON_SCOPE_EXIT { g_accepted++; };  // after the session object exists (and counts)
                     R_RETURN(this->AcceptMitmImpl(server, sf::CreateSharedObjectEmplaced<IBsdMitm, BsdMitmService>(decltype(fsrv)(fsrv), client_info), fsrv));
                 }
         };
@@ -663,7 +695,7 @@ namespace ams::bsd_mitm {
             public:
                 using BsdMitmService::BsdMitmService;
                 static bool ShouldMitm(const sm::MitmProcessInfo &c) {
-                    return g_sys_ftpd && c.program_id.value == SysFtpdProgramId;
+                    return AnswerQuery(g_sys_ftpd && c.program_id.value == SysFtpdProgramId);
                 }
         };
 
@@ -678,6 +710,7 @@ namespace ams::bsd_mitm {
                     std::shared_ptr<::Service> fsrv;
                     sm::MitmProcessInfo client_info;
                     server->AcknowledgeMitmSession(std::addressof(fsrv), std::addressof(client_info));
+                    ON_SCOPE_EXIT { g_accepted++; };
                     R_RETURN(this->AcceptMitmImpl(server, sf::CreateSharedObjectEmplaced<IBsdMitm, BsdSystemMitmService>(decltype(fsrv)(fsrv), client_info), fsrv));
                 }
         };
@@ -872,28 +905,93 @@ namespace ams::bsd_mitm {
         return true;
     }
 
+    namespace {
+
+        // sys-ftpd's sockets go through us and die with this process: once
+        // bsd:s is uninstalled, restart it so it reconnects directly and FTP
+        // keeps working. No logging: this also runs from the crash handler,
+        // which may hold the log lock.
+        void RestartSysFtpdDirect() {
+            if (R_FAILED(pmshellInitialize())) return;
+            if (R_SUCCEEDED(pmshellTerminateProgram(SysFtpdProgramId))) {
+                const NcmProgramLocation loc = {.program_id = SysFtpdProgramId, .storageID = NcmStorageId_None};
+                u64 pid = 0;
+                for (int i = 0; i < 20 && R_FAILED(pmshellLaunchProgram(0, std::addressof(loc), std::addressof(pid))); i++) {
+                    svcSleepThread(100'000'000);
+                }
+            }
+            pmshellExit();
+        }
+
+    }
+
     void UninstallForExit() {
-        if (!g_installed) return;
-        g_installed = false;
-        static_cast<void>(sm::mitm::UninstallMitm(BsdUName));
+        if (g_installed) {
+            g_installed = false;
+            static_cast<void>(sm::mitm::UninstallMitm(BsdUName));
+        }
         if (g_installed_s) {
             g_installed_s = false;
             static_cast<void>(sm::mitm::UninstallMitm(BsdSName));
-            // sys-ftpd's sockets go through us and die with this process:
-            // restart it so it reconnects directly and FTP keeps working.
-            // No logging here: this also runs from the crash handler, which
-            // may hold the log lock.
-            if (R_SUCCEEDED(pmshellInitialize())) {
-                if (R_SUCCEEDED(pmshellTerminateProgram(SysFtpdProgramId))) {
-                    const NcmProgramLocation loc = {.program_id = SysFtpdProgramId, .storageID = NcmStorageId_None};
-                    u64 pid = 0;
-                    for (int i = 0; i < 20 && R_FAILED(pmshellLaunchProgram(0, std::addressof(loc), std::addressof(pid))); i++) {
-                        svcSleepThread(100'000'000);
-                    }
-                }
-                pmshellExit();
-            }
+            RestartSysFtpdDirect();
         }
+    }
+
+    StopCheck PrepareStop(u32 *out_homebrew_sessions) {
+        auto homebrew = [] { return std::max<s32>(0, g_live_sessions.load() - g_live_sys_ftpd_sessions.load()); };
+        *out_homebrew_sessions = 0;
+        if (!g_installed && !g_installed_s) return StopCheck::Ok;
+        if (const s32 n = homebrew(); n > 0) {
+            *out_homebrew_sessions = static_cast<u32>(n);
+            return StopCheck::Homebrew;
+        }
+        {
+            std::scoped_lock lk(g_query_mutex);
+            g_stopping = true;
+        }
+        // An acknowledgement takes a server thread a moment; with no
+        // homebrew sessions none of them is held up by a blocking call.
+        for (int i = 0; i < 100 && PendingAcknowledgements() != 0; i++) os::SleepThread(TimeSpan::FromMilliSeconds(10));
+        const u32 pending = PendingAcknowledgements();
+        const s32 n = homebrew();  // a session acknowledged just now counts too
+        if (n > 0 || pending != 0) {
+            CancelStop();
+            *out_homebrew_sessions = static_cast<u32>(n);
+            if (pending != 0) Log("bsd mitm: %u session(s) from sm not acknowledged; not stopping", pending);
+            return n > 0 ? StopCheck::Homebrew : StopCheck::Busy;
+        }
+        return StopCheck::Ok;
+    }
+
+    void CancelStop() {
+        std::scoped_lock lk(g_query_mutex);
+        g_stopping = false;
+    }
+
+    bool UninstallForStop() {
+        if (g_installed) {
+            if (const Result rc = sm::mitm::UninstallMitm(BsdUName); R_FAILED(rc)) {
+                Log("bsd mitm: uninstalling bsd:u failed: 0x%x", rc.GetValue());
+                return false;
+            }
+            g_installed = false;
+        }
+        if (g_installed_s) {
+            if (const Result rc = sm::mitm::UninstallMitm(BsdSName); R_FAILED(rc)) {
+                Log("bsd mitm: uninstalling bsd:s failed: 0x%x", rc.GetValue());
+                return false;
+            }
+            g_installed_s = false;
+            Log("bsd mitm: restarting sys-ftpd so it no longer goes through us");
+            RestartSysFtpdDirect();
+        }
+        // Left: sys-ftpd's sessions, closing as its old process goes away.
+        for (int i = 0; i < 300 && g_live_sessions.load() != 0; i++) os::SleepThread(TimeSpan::FromMilliSeconds(10));
+        if (const s32 n = g_live_sessions.load(); n != 0) {
+            Log("bsd mitm: %d session(s) still open after uninstalling", n);
+            return false;
+        }
+        return true;
     }
 
 }

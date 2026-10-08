@@ -272,11 +272,18 @@ namespace ams::status {
         return g_paused;
     }
 
+    void SetStopping() {
+        std::scoped_lock lk(g_mutex);
+        g_status.state = TSNX_CTL_STOPPING;
+        g_login_url[0] = 0;
+        ClearLogin();
+    }
+
     void SetPaused(bool paused) {
         ::tsnx::Runtime *rt;
         {
             std::scoped_lock lk(g_mutex);
-            if (g_paused == paused || !g_runtime) return;
+            if (g_paused == paused || !g_runtime || g_status.state == TSNX_CTL_STOPPING) return;
             g_paused = paused;
             rt = g_runtime;
             if (paused) {
