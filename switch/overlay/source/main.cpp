@@ -215,6 +215,7 @@ namespace {
     constexpr const char CrashedPath[] = "sdmc:/config/tailscale-nx/crashed";
     constexpr const char Boot2Path[] = "sdmc:/atmosphere/contents/4200000000005453/flags/boot2.flag";
     char g_crashed[160] = {};   // first line of the crash guard's reason
+    char g_not_started[200] = {};  // why it declined to start (too little memory)
     bool g_no_boot_flag = false;
     bool g_disabled = false;
 
@@ -224,6 +225,11 @@ namespace {
             if (FILE *f = std::fopen(CrashedPath, "r")) {
                 if (!std::fgets(g_crashed, sizeof g_crashed, f) || !g_crashed[0]) std::snprintf(g_crashed, sizeof g_crashed, "repeated failures");
                 g_crashed[std::strcspn(g_crashed, "\r\n")] = 0;
+                std::fclose(f);
+            }
+            g_not_started[0] = 0;
+            if (FILE *f = std::fopen("sdmc:/config/tailscale-nx/not_started", "r")) {
+                if (std::fgets(g_not_started, sizeof g_not_started, f)) g_not_started[std::strcspn(g_not_started, "\r\n")] = 0;
                 std::fclose(f);
             }
             FILE *b = std::fopen(Boot2Path, "r");
@@ -381,6 +387,10 @@ namespace {
                 if (why[cut]) std::snprintf(second, sizeof second, "%s", why + cut + (why[cut] == ' '));
                 r->drawString(first, false, x + 20, y + 98, 15, r->a(Grey));
                 if (second[0]) r->drawString(second, false, x + 20, y + 116, 15, r->a(Grey));
+            } else if (g_not_started[0]) {
+                // "Too little system memory: other sysmodules leave N KB free ..."
+                r->drawString("It didn't start: too little system memory.", false, x + 20, y + 75, 17, r->a(Grey));
+                r->drawString("Other sysmodules use the rest; turn one off.", false, x + 20, y + 100, 17, r->a(Grey));
             } else if (g_disabled) {
                 r->drawString("config/tailscale-nx/disabled keeps it off.", false, x + 20, y + 75, 17, r->a(Grey));
                 r->drawString("Delete that file to start it.", false, x + 20, y + 100, 17, r->a(Grey));
@@ -438,6 +448,12 @@ namespace {
         if (g_status.flags & TSNX_CTL_FLAG_MITM) line("Homebrew apps can reach tailnet addresses.", White);
         if (g_status.flags & TSNX_CTL_FLAG_MAGICDNS) line("Tailnet names resolve (e.g. in Moonlight).", White);
         if (g_status.state == TSNX_CTL_PAUSED) line("Paused: tailnet connections fail until resumed.", Grey);
+        if (g_status.memory_kb) {
+            char mem[96];
+            std::snprintf(mem, sizeof mem, "Memory: %u.%u MB. System memory free: %u.%u MB.", g_status.memory_kb / 1024,
+                          g_status.memory_kb % 1024 * 10 / 1024, g_status.system_free_kb / 1024, g_status.system_free_kb % 1024 * 10 / 1024);
+            line(mem, Grey);
+        }
         if (g_last_error[0] && g_status.state != TSNX_CTL_CONNECTED) {
             ty += 8;
             line("Last error:", Grey);

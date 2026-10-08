@@ -17,10 +17,10 @@ hostname=nintendo-switch
 # them reach the tailnet too. The tool that made the forwarder shows its ID,
 # as do title managers such as DBI or Goldleaf. Ignored with mitm=off.
 # mitm_titles=0500000000001234, 05ABCDEF00000000
-# Memory for tailnet sockets, shared by all apps (KB, 128-512, default 320).
+# Memory for tailnet sockets, shared by all apps (KB, 128-384, default 320).
 # TCP connections get smaller buffers as it fills, so about 17 fit at once by
 # default; raise it only if apps report "no buffer space" (errno 105). It
-# comes out of the sysmodule's fixed 1 MB heap.
+# comes out of the sysmodule's fixed 832 KB heap.
 # overlay_budget_kb=320
 # A 5-second "Connected. IP: ..." toast after each boot (also switchable in
 # the overlay).

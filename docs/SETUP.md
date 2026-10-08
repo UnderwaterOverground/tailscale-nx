@@ -188,7 +188,7 @@ All settings are optional. They take effect after a restart.
 | `accept_routes` | `on` | `off` ignores your tailnet's [subnet routes](#subnet-routes) |
 | `mitm` | `homebrew` | Which programs can reach the tailnet: `homebrew`, `off`, or `homebrew,sys-ftpd` (see below) |
 | `mitm_titles` | none | Title IDs of home-screen forwarders that can reach the tailnet too, up to 16 (see below) |
-| `overlay_budget_kb` | `320` | Memory for tailnet sockets, shared by all apps (128–512). Raise it only if apps report "no buffer space". |
+| `overlay_budget_kb` | `320` | Memory for tailnet sockets, shared by all apps (128–384). Raise it only if apps report "no buffer space". |
 | `ca_cert` | none | Extra CA certificate (DER) for a self-signed headscale |
 | `log_udp` | none | Send the log to `ip:port` over UDP, e.g. to `nc -ul 5514` on a computer |
 
@@ -231,10 +231,16 @@ to `mitm=homebrew`.
 
 ## Memory
 
-tailscale-nx uses about **2.6 MB** of the memory the system sets aside for
-sysmodules: 0.9 MB of code and 1.7 MB of data, including a fixed 1 MB heap.
-The heap is typically 15–30% full. Busy tailnet sockets use
-more of it, up to the `overlay_budget_kb` limit.
+tailscale-nx uses exactly **2.5 MB** of the memory the system sets aside for
+sysmodules, taken once when it starts. It never grows or shrinks: about
+1 MB of code and 1.5 MB of data, including a fixed 832 KB heap. Busy tailnet
+sockets use more of that heap, up to the `overlay_budget_kb` limit.
+
+- The overlay shows how much system memory is free.
+- If other sysmodules leave less than 1 MB free once tailscale-nx is
+  running, it doesn't start, and gives its memory back. Nintendo starts some
+  system modules only when they're needed, and they fail without room. The
+  overlay and the log say why; turn off a sysmodule you don't need.
 
 ## Troubleshooting
 

@@ -45,7 +45,9 @@ typedef struct {
     uint32_t peers;
     uint32_t home_derp;  // relay region id, 0 if none
     uint32_t flags;      // TSNX_CTL_FLAG_*
-    uint32_t reserved[10];
+    uint32_t memory_kb;       // what tailscale-nx takes (fixed), 0 if unknown
+    uint32_t system_free_kb;  // free system memory, which sysmodules share
+    uint32_t reserved[8];
 } TsnxCtlStatus;
 
 #ifdef __cplusplus

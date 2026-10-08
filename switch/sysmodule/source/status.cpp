@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "log.hpp"
+#include "memory.hpp"
 #include "runtime.hpp"
 #include "status.hpp"
 
@@ -254,8 +255,15 @@ namespace ams::status {
     }
 
     TsnxCtlStatus Get() {
-        std::scoped_lock lk(g_mutex);
-        return g_status;
+        TsnxCtlStatus s;
+        {
+            std::scoped_lock lk(g_mutex);
+            s = g_status;
+        }
+        s.memory_kb = static_cast<u32>(memory::Own() / 1024);
+        u64 free_bytes = 0, total = 0;
+        if (memory::SystemPool(&free_bytes, &total)) s.system_free_kb = static_cast<u32>(free_bytes / 1024);
+        return s;
     }
 
     size_t GetLoginUrl(char *out, size_t cap) {

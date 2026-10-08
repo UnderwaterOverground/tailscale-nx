@@ -70,8 +70,11 @@ $(LIBSTRAT): $(ATMOSPHERE_PATCHES)
 	done
 	$(SW) make -C third_party/Atmosphere/libraries/libstratosphere -j8
 
+# Then holds its memory at exactly 2.5 MB (tools/footprint.sh resizes the heap
+# and asks for one more build when the code size moved).
 sysmodule: rust-switch $(LIBSTRAT)
 	$(SW) make -C switch/sysmodule TSNX_BUILD_UNIX=$(BUILD_UNIX) dist
+	$(SW) tools/footprint.sh || { [ $$? -eq 3 ] && $(SW) make -C switch/sysmodule TSNX_BUILD_UNIX=$(BUILD_UNIX) dist && $(SW) tools/footprint.sh; }
 
 # Publish to GitHub: only main and v* tags (the `github` remote's push
 # refspecs); other branches stay on the private Gitea. Pushing a v* tag

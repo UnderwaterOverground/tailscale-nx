@@ -34,7 +34,7 @@ without opening ports on your router.
 - **Respects your tailnet's access rules (ACLs)** for incoming connections.
 - **Optional:** reach the Switch's [sys-ftpd](https://github.com/cathery/sys-ftpd)
   over the tailnet.
-- **Small:** about 2.6 MB of memory.
+- **Small:** exactly 2.5 MB of memory, fixed when it starts.
 
 ## Requirements
 
