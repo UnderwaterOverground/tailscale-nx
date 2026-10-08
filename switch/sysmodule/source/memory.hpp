@@ -11,4 +11,8 @@ namespace ams::memory {
     // Free and total bytes of the memory pool we were launched in.
     bool SystemPool(u64 *free_bytes, u64 *total_bytes);
 
+    // Tracks the least free system memory seen (call often during boot);
+    // logs it once, `after_ns` past the first call.
+    void SampleBootLow(u64 now_ns, u64 after_ns);
+
 }

@@ -1,6 +1,8 @@
 // See memory.hpp.
 #include "memory.hpp"
 
+#include "log.hpp"
+
 namespace ams::memory {
 
     u64 Own() {
@@ -20,6 +22,20 @@ namespace ams::memory {
         *free_bytes = static_cast<u64>(limit - current);
         *total_bytes = static_cast<u64>(limit);
         return true;
+    }
+
+    void SampleBootLow(u64 now_ns, u64 after_ns) {
+        static u64 first = 0, low = UINT64_MAX;
+        static bool done = false;
+        if (done) return;
+        if (!first) first = now_ns;
+        u64 free_bytes = 0, total = 0;
+        if (SystemPool(&free_bytes, &total)) low = std::min(low, free_bytes);
+        if (now_ns - first >= after_ns && low != UINT64_MAX) {
+            done = true;
+            Log("memory: least free system memory in the %lu s after we started: %lu KB", static_cast<unsigned long>(after_ns / 1'000'000'000ull),
+                static_cast<unsigned long>(low / 1024));
+        }
     }
 
 }

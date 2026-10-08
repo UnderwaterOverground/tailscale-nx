@@ -72,6 +72,9 @@ namespace ams {
         // System memory left for everything launched after us: Nintendo
         // starts some modules on demand, and they fail without it.
         constexpr u64 MinSystemFree = 1_MB;
+        // How long after our start to watch the system's free memory (boot
+        // and the HOME menu starting), for the log.
+        constexpr u64 BootLowWindowNs = 120'000'000'000ull;
         constexpr const char CrashedPath[] = "sdmc:/config/tailscale-nx/crashed";
         constexpr const char StartingPath[] = "sdmc:/config/tailscale-nx/starting";
         constexpr const char SleepingPath[] = "sdmc:/config/tailscale-nx/sleeping";
@@ -901,7 +904,10 @@ namespace ams {
         // cheap IPC per 100 ms, so we start soon after Wi-Fi does.
         if (!NetworkUp()) {
             Log("waiting for the network");
-            while (!NetworkUp()) os::SleepThread(TimeSpan::FromMilliSeconds(100));
+            while (!NetworkUp()) {
+                memory::SampleBootLow(armTicksToNs(armGetSystemTick()), BootLowWindowNs);
+                os::SleepThread(TimeSpan::FromMilliSeconds(100));
+            }
         }
         u32 ip = CurrentIp();
         Log("network up, local address %s", inet_ntoa(in_addr{ip}));
@@ -1017,6 +1023,7 @@ namespace ams {
         size_t heap_all_peak = 0;
         rt->Run([&](TsnxDriver *d) {
             const u64 now = armTicksToNs(armGetSystemTick());
+            memory::SampleBootLow(now, BootLowWindowNs);
             // Whole-heap use (Rust, C++, C), sampled every round; the Rust
             // peak below is exact.
             const size_t heap_free = init::GetAllocator()->GetTotalFreeSize();
