@@ -152,6 +152,11 @@ sys-ftpd itself has two limits, with or without tailscale-nx:
 For big transfers, the ftpd homebrew app is much faster. It reaches the
 tailnet with the default `mitm=homebrew`.
 
+Serving sys-ftpd also uses extra system sessions, which every sysmodule
+shares. On consoles running many sysmodules, other homebrew (such as
+Moonlight) may be unable to connect while it's on. If that happens, go back
+to `mitm=homebrew`.
+
 ## Memory
 
 tailscale-nx uses about **2.6 MB** of the memory the system sets aside for
