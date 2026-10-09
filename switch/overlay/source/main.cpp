@@ -25,7 +25,9 @@ namespace {
     bool ServiceExists(const char *name) {
         u8 has = 0;
         const SmServiceName sn = smEncodeName(name);
-        return R_SUCCEEDED(tipcDispatchInOut(smGetServiceSessionTipc(), 65100, sn, has)) && (has & 1);
+        Result rc = 0;
+        tsl::hlp::doWithSmSession([&] { rc = tipcDispatchInOut(smGetServiceSessionTipc(), 65100, sn, has); });  // see OpenCtl
+        return R_SUCCEEDED(rc) && (has & 1);
     }
 
     bool CtlGetStatus(TsnxCtlStatus *out) {
@@ -52,9 +54,12 @@ namespace {
         g_status_ok = false;
     }
 
-    // Only once the service exists (see ServiceExists).
+    // Only once the service exists (see ServiceExists). Tesla keeps no sm
+    // session open after start-up, so open one around each use.
     void OpenCtl() {
-        if (!g_have_ctl) g_have_ctl = ServiceExists(TSNX_CTL_SERVICE) && R_SUCCEEDED(smGetService(&g_ctl, TSNX_CTL_SERVICE));
+        if (g_have_ctl) return;
+        tsl::hlp::doWithSmSession(
+            [] { g_have_ctl = ServiceExists(TSNX_CTL_SERVICE) && R_SUCCEEDED(smGetService(&g_ctl, TSNX_CTL_SERVICE)); });
     }
 
     // ---- stop and start ------------------------------------------------------
@@ -185,7 +190,8 @@ namespace {
                 std::fclose(f);
             }
         });
-        Result rc = pmshellInitialize();
+        Result rc = 0;
+        tsl::hlp::doWithSmSession([&rc] { rc = pmshellInitialize(); });  // see OpenCtl
         if (R_SUCCEEDED(rc)) {
             const NcmProgramLocation loc = {.program_id = SysmoduleProgramId, .storageID = NcmStorageId_None};
             u64 pid = 0;
@@ -200,7 +206,7 @@ namespace {
             }
             char line[64];
             std::snprintf(line, sizeof line, "Couldn't start it (error 0x%x).", rc);
-            Say(line);
+            Say(line, "Restarting the console starts it.");
             return;
         }
         Say("");
@@ -450,7 +456,7 @@ namespace {
         if (g_status.state == TSNX_CTL_PAUSED) line("Paused: tailnet connections fail until resumed.", Grey);
         if (g_status.memory_kb) {
             char mem[96];
-            std::snprintf(mem, sizeof mem, "Memory: %u.%u MB. System memory free: %u.%u MB.", g_status.memory_kb / 1024,
+            std::snprintf(mem, sizeof mem, "Memory: %u.%u MB. System free: %u.%u MB.", g_status.memory_kb / 1024,
                           g_status.memory_kb % 1024 * 10 / 1024, g_status.system_free_kb / 1024, g_status.system_free_kb % 1024 * 10 / 1024);
             line(mem, Grey);
         }
@@ -533,7 +539,7 @@ namespace {
 
                 // The sysmodule's "Connected. IP: ..." toast at boot; off is
                 // a marker file it checks when it connects.
-                auto *notice = new tsl::elm::ToggleListItem("Notice when connected", !NoticeOff());
+                auto *notice = new tsl::elm::ToggleListItem("Connection notice", !NoticeOff());
                 notice->setStateChangedListener([](bool on) { SetNoticeOff(!on); });
                 list->addItem(notice);
 
