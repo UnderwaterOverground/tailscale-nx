@@ -20,6 +20,9 @@ namespace ams::status {
     // after boot (unless the overlay turned it off).
     void Initialize(::tsnx::Runtime &rt, u32 flags, bool connect_notice);
 
+    // A newer release (version without the "v") is out: a toast saying so.
+    void AnnounceUpdate(const char *latest);
+
     // Engine events (engine thread, runtime lock held).
     void OnEvent(const TsnxEvent &ev);
 

@@ -27,6 +27,8 @@ without opening ports on your router.
   relays (DERP) as a fallback, just like the official clients.
 - **Overlay** (Ultrahand): status, the Switch's tailnet IP, a pause switch,
   stop and start, and a QR code for logging in.
+- **Update notice:** a notification at boot when a newer release is out
+  (can be turned off).
 - **Easy login:** scan a QR code, or put an auth key in a config file. Key
   expiry is handled.
 - **Taildrop:** send files to the Switch from your phone or computer. They

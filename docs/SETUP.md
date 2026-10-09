@@ -108,6 +108,12 @@ Until either happens, the Switch can't reach the tailnet.
   connected** in the overlay.
 - **Taildrop:** send files to the Switch from your other devices (see
   [below](#taildrop)).
+- **Update notice:** 30 seconds after each boot, tailscale-nx asks GitHub
+  for the latest release. If it's newer than the installed one, a
+  10-second toast says so. If GitHub can't be reached, nothing happens (the
+  reason is in `sysmodule.log`). This request shows GitHub the console's
+  public IP address, as any web request does. Nothing else is sent. Turn
+  it off with **Check for updates** in the overlay.
 - **Pause:** use the **Tailscale** switch in the overlay. While paused,
   tailnet connections fail at once and everything else works normally.
 - **Stop and start:** **Stop tailscale-nx** in the overlay ends the
@@ -186,6 +192,7 @@ All settings are optional. They take effect after a restart.
 | `connect_notice` | `on` | `off` turns off the "Connected" toast at boot (as does the overlay switch) |
 | `taildrop` | `on` | `off` stops receiving files with [Taildrop](#taildrop) |
 | `accept_routes` | `on` | `off` ignores your tailnet's [subnet routes](#subnet-routes) |
+| `update_check` | `on` | `off` stops checking GitHub for a newer release at boot (as does the overlay switch) |
 | `mitm` | `homebrew` | Which programs can reach the tailnet: `homebrew`, `off`, or `homebrew,sys-ftpd` (see below) |
 | `mitm_titles` | none | Title IDs of home-screen forwarders that can reach the tailnet too, up to 16 (see below) |
 | `overlay_budget_kb` | `320` | Memory for tailnet sockets, shared by all apps (128–512). Raise it only if apps report "no buffer space". |

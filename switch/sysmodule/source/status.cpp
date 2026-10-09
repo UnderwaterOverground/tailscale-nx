@@ -19,6 +19,7 @@ namespace ams::status {
         constexpr const char NotifyDir[] = "sdmc:/config/ultrahand/notifications";
         constexpr const char NotifyPath[] = "sdmc:/config/ultrahand/notifications/tailscale-nx-login.notify";
         constexpr const char ConnectedNotifyPath[] = "sdmc:/config/ultrahand/notifications/tailscale-nx-connected.notify";
+        constexpr const char UpdateNotifyPath[] = "sdmc:/config/ultrahand/notifications/tailscale-nx-update.notify";
         // The overlay's "Notice when connected" switch: present = off.
         constexpr const char NoNoticePath[] = "sdmc:/config/tailscale-nx/no-connect-notice";
         constexpr const char UltrahandConfig[] = "sdmc:/config/ultrahand/config.ini";
@@ -251,6 +252,21 @@ namespace ams::status {
         char path[96];
         util::SNPrintf(path, sizeof path, "%s/tailscale-nx-taildrop-%u.notify", NotifyDir, static_cast<unsigned>(seq++ % 8));
         WriteFile(path, json, static_cast<size_t>(len));
+    }
+
+    void AnnounceUpdate(const char *latest) {
+        if (!Exists(NotifyDir, fs::DirectoryEntryType_Directory)) return;
+        static char json[256];
+        const int n = util::SNPrintf(json, sizeof json,
+                                     "{\n"
+                                     "    \"title\": \"Tailscale: update available\",\n"
+                                     "    \"text\": \"tailscale-nx %s is out (you have %s).\",\n"
+                                     "    \"font_size\": 18,\n"
+                                     "    \"duration\": 10000,\n"
+                                     "    \"priority\": 10\n"
+                                     "}\n",
+                                     latest, tsnx_version());
+        WriteFile(UpdateNotifyPath, json, static_cast<size_t>(n));
     }
 
     TsnxCtlStatus Get() {
