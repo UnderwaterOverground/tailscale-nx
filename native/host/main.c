@@ -3,14 +3,17 @@
 //
 //   tsnx-c --control URL [--authkey K] [--hostname H] [--state FILE]
 //          [--extra-root CA.der] [--echo-test 100.x.y.z]
+//   tsnx-c --update-check VERSION   (GitHub release check, as at boot)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "tsnx.h"
 #include "tsnx_app.h"
 #include "tsnx_driver.h"
+#include "tsnx_update.h"
 
 void tsnx_platform_random(uint8_t *buf, size_t len) { arc4random_buf(buf, len); }
 
@@ -44,11 +47,29 @@ static uint8_t *read_file(const char *path, size_t *len) {
     return buf;
 }
 
+// The sysmodule's boot-time update check, with `current` as our version.
+static int update_check(const char *current) {
+    uint8_t seed[32];
+    tsnx_platform_random(seed, sizeof seed);
+    tsnx_seed_rng(seed);
+    tsnx_set_unix_time((uint64_t)time(NULL));
+    TsnxUpdate *u = tsnx_update_start(TSNX_UPDATE_REPO, current, tsnx_driver_now_ns(), 30000);
+    if (!u) return 1;
+    int r;
+    while ((r = tsnx_update_step(u, tsnx_driver_now_ns())) == TSNX_UPDATE_PENDING) usleep(50000);
+    if (r == TSNX_UPDATE_FAILED) printf("update check failed: %s\n", tsnx_update_error(u));
+    else printf("latest %s: %s\n", tsnx_update_latest(u), r == TSNX_UPDATE_NEWER ? "newer" : "not newer");
+    tsnx_update_free(u);
+    return r == TSNX_UPDATE_FAILED;
+}
+
 int main(int argc, char **argv) {
+    const char *update_version = arg(argc, argv, "--update-check");
+    if (update_version) return update_check(update_version);
     const char *control = arg(argc, argv, "--control");
     if (!control) {
         fprintf(stderr, "usage: %s --control URL [--authkey K] [--hostname H] [--state FILE] "
-                        "[--extra-root CA.der] [--echo-test IP]\n", argv[0]);
+                        "[--extra-root CA.der] [--echo-test IP]\n       %s --update-check VERSION\n", argv[0], argv[0]);
         return 2;
     }
     uint8_t seed[32];

@@ -20,3 +20,6 @@ hostname=nintendo-switch
 # A 5-second "Connected. IP: ..." toast after each boot (also switchable in
 # the overlay).
 # connect_notice=on
+# Ask GitHub for the latest release 30 seconds after each boot, and show a
+# toast if it's newer (also switchable in the overlay).
+# update_check=on

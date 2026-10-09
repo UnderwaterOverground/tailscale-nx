@@ -234,25 +234,27 @@ namespace {
 
     // ---- settings -------------------------------------------------------------
 
+    // Switches the sysmodule reads as marker files: present = off.
     constexpr const char NoNoticePath[] = "sdmc:/config/tailscale-nx/no-connect-notice";
+    constexpr const char NoUpdateCheckPath[] = "sdmc:/config/tailscale-nx/no-update-check";
 
-    bool NoticeOff() {
-        bool off = false;
+    bool MarkerExists(const char *path) {
+        bool exists = false;
         tsl::hlp::doWithSDCardHandle([&] {
-            if (FILE *f = std::fopen(NoNoticePath, "r")) {
-                off = true;
+            if (FILE *f = std::fopen(path, "r")) {
+                exists = true;
                 std::fclose(f);
             }
         });
-        return off;
+        return exists;
     }
 
-    void SetNoticeOff(bool off) {
+    void SetMarker(const char *path, bool present) {
         tsl::hlp::doWithSDCardHandle([&] {
-            if (off) {
-                if (FILE *f = std::fopen(NoNoticePath, "w")) std::fclose(f);
+            if (present) {
+                if (FILE *f = std::fopen(path, "w")) std::fclose(f);
             } else {
-                std::remove(NoNoticePath);
+                std::remove(path);
             }
         });
     }
@@ -286,9 +288,15 @@ namespace {
 
                 // The sysmodule's "Connected. IP: ..." toast at boot; off is
                 // a marker file it checks when it connects.
-                auto *notice = new tsl::elm::ToggleListItem("Notice when connected", !NoticeOff());
-                notice->setStateChangedListener([](bool on) { SetNoticeOff(!on); });
+                auto *notice = new tsl::elm::ToggleListItem("Notice when connected", !MarkerExists(NoNoticePath));
+                notice->setStateChangedListener([](bool on) { SetMarker(NoNoticePath, !on); });
                 list->addItem(notice);
+
+                // The sysmodule's check for a newer release on GitHub, 30 s
+                // after boot (a toast if there is one).
+                auto *updates = new tsl::elm::ToggleListItem("Check for updates", !MarkerExists(NoUpdateCheckPath));
+                updates->setStateChangedListener([](bool on) { SetMarker(NoUpdateCheckPath, !on); });
+                list->addItem(updates);
 
                 list->addItem(new tsl::elm::CustomDrawer(DrawLogin), 330);
                 list->addItem(new tsl::elm::CustomDrawer(DrawTip), 60);

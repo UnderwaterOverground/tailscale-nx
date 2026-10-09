@@ -4,11 +4,12 @@ webpki-roots trust anchors (Mozilla's set), to keep the Switch build small.
 
 Covers Tailscale (Let's Encrypt) and the CAs self-hosted control servers
 commonly use. Anything else: configure the server's root with ca_cert=.
+github.com (the update check) chains to Sectigo E46, cross-signed by USERTrust ECC.
 Usage: tools/gen-roots.py <path to webpki-roots/src/lib.rs>
 """
 import re, sys
 
-KEEP = ["ISRG Root", "GTS Root", "DigiCert Global Root", "USERTrust", "Amazon Root CA",
+KEEP = ["ISRG Root", "GTS Root", "DigiCert Global Root", "USERTrust", "Sectigo Public Server", "Amazon Root CA",
         "GlobalSign Root", "GlobalSign ECC Root", "Microsoft RSA Root", "Microsoft ECC Root"]
 
 src = open(sys.argv[1]).read()

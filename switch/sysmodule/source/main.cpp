@@ -10,9 +10,10 @@
 //                                    mitm=homebrew|homebrew,sys-ftpd|off,
 //                                    magicdns=on|off,
 //                                    overlay_budget_kb=<128..512>,
-//                                    connect_notice=on|off)
+//                                    connect_notice=on|off, update_check=on|off)
 //   config/tailscale-nx/state        node keys, shared with the app
 //   config/tailscale-nx/disabled     kill switch: if present, exit at boot
+//   config/tailscale-nx/no-update-check  the overlay's update check switch (off)
 //   config/tailscale-nx/crashed      written after 3 boots in a row that ended
 //                                    within 3 minutes, or 2 sleeps that never woke;
 //                                    keeps it off (delete to retry)
@@ -36,6 +37,7 @@ extern "C" {
 #include "tsnx_app.h"
 #include "tsnx_dns.h"
 #include "tsnx_driver.h"
+#include "tsnx_update.h"
 }
 
 #include <memory>
@@ -237,6 +239,7 @@ namespace ams {
             char magicdns[8] = "on";      // tailnet names in Atmosphere's hosts file, or "off"
             char overlay_budget_kb[8] = {};  // tailnet socket buffers; default 320
             char connect_notice[8] = "on";   // toast with our address when first connected
+            char update_check[8] = "on";     // ask GitHub for a newer release at boot
         };
 
         void LoadConfig(Config &c) {
@@ -261,6 +264,7 @@ namespace ams {
                 set("magicdns", c.magicdns, sizeof c.magicdns);
                 set("overlay_budget_kb", c.overlay_budget_kb, sizeof c.overlay_budget_kb);
                 set("connect_notice", c.connect_notice, sizeof c.connect_notice);
+                set("update_check", c.update_check, sizeof c.update_check);
             }
         }
 
@@ -362,6 +366,67 @@ namespace ams {
             if (R_SUCCEEDED(timeGetCurrentTime(TimeType_NetworkSystemClock, &t)) && t > static_cast<u64>(TSNX_BUILD_UNIX)) return t;
             if (R_SUCCEEDED(timeGetCurrentTime(TimeType_UserSystemClock, &t))) return t;
             return 0;
+        }
+
+        // ---- update check --------------------------------------------------
+
+        // Once per boot, a while after starting (out of the way of joining
+        // the tailnet): a newer release on GitHub gets a toast. Failures are
+        // only logged. Off with update_check=off or the overlay's switch.
+        constexpr const char NoUpdateCheckPath[] = "sdmc:/config/tailscale-nx/no-update-check";
+        constexpr u64 UpdateCheckDelayNs = 30'000'000'000ull;
+        constexpr u32 UpdateCheckTimeoutMs = 30'000;
+
+        constinit bool g_update_check = false;  // still to do this boot
+        constinit u64 g_update_check_at_ns = 0;  // 0: counted from the next tick
+        constinit TsnxUpdate *g_update = nullptr;
+
+        // Engine loop, runtime lock held. Only the start blocks (DNS lookup).
+        void StepUpdateCheck(u64 now) {
+            if (!g_update_check) return;
+            if (!g_update) {
+                if (g_update_check_at_ns == 0) g_update_check_at_ns = now + UpdateCheckDelayNs;
+                if (now < g_update_check_at_ns) return;
+                if (!NetworkUp()) {
+                    g_update_check_at_ns = now + 5'000'000'000ull;
+                    return;
+                }
+                // Read now, so the overlay's switch applies to this boot too.
+                if (FileExists(NoUpdateCheckPath)) {
+                    g_update_check = false;
+                    return;
+                }
+                g_update = tsnx_update_start(TSNX_UPDATE_REPO, tsnx_version(), tsnx_driver_now_ns(), UpdateCheckTimeoutMs);
+                if (!g_update) {
+                    Log("update check: out of memory");
+                    g_update_check = false;
+                    return;
+                }
+            }
+            const int r = tsnx_update_step(g_update, tsnx_driver_now_ns());
+            if (r == TSNX_UPDATE_PENDING) return;
+            if (r == TSNX_UPDATE_NEWER) {
+                Log("update check: %s is available (this is %s)", tsnx_update_latest(g_update), tsnx_version());
+                status::AnnounceUpdate(tsnx_update_latest(g_update));
+            } else if (r == TSNX_UPDATE_CURRENT) {
+                Log("update check: up to date (latest release %s)", tsnx_update_latest(g_update));
+            } else {
+                Log("update check failed: %s", tsnx_update_error(g_update));
+            }
+            tsnx_update_free(g_update);
+            g_update = nullptr;
+            g_update_check = false;
+        }
+
+        // Sleep or pause (engine thread): the socket must close now. Checks
+        // again a while after resuming.
+        void SuspendUpdateCheck() {
+            if (g_update) {
+                tsnx_update_free(g_update);
+                g_update = nullptr;
+                Log("update check: interrupted; trying again after resuming");
+            }
+            g_update_check_at_ns = 0;
         }
 
         const char *EventName(u32 kind) {
@@ -755,7 +820,11 @@ namespace ams {
 
         // Homebrew sockets to tailnet addresses go through the engine.
         // The log socket goes down and up with the engine's own (sleep).
-        rt->SetSuspendHooks([] { CloseUdpLogSocket(); }, [] {
+        g_update_check = std::strcmp(cfg.update_check, "off") != 0;
+        rt->SetSuspendHooks([] {
+            CloseUdpLogSocket();
+            SuspendUpdateCheck();
+        }, [] {
             g_tailnet_log_hold_until_ns = armTicksToNs(armGetSystemTick()) + 10'000'000'000ull;
             OpenUdpLogSocket();
         });
@@ -801,6 +870,7 @@ namespace ams {
                 stack_watch::Log();
             }
             FlushTailnetLog(engine);
+            StepUpdateCheck(now);
             if (magicdns && hosts_dirty_since != 0 && now - hosts_dirty_since > 3'000'000'000ull) {
                 hosts_dirty_since = 0;
                 hosts::Update(engine);

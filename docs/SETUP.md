@@ -105,6 +105,12 @@ Until either happens, the Switch can't reach the tailnet.
   "Connected. IP: 100.x.y.z" the first time the Switch connects. It doesn't
   appear again on wake or reconnect. Turn it off with **Notice when
   connected** in the overlay.
+- **Update notice:** 30 seconds after each boot, tailscale-nx asks GitHub
+  for the latest release. If it's newer than the installed one, a
+  10-second toast says so. If GitHub can't be reached, nothing happens (the
+  reason is in `sysmodule.log`). This request shows GitHub the console's
+  public IP address, as any web request does. Nothing else is sent. Turn
+  it off with **Check for updates** in the overlay.
 - **Pause:** use the **Tailscale** switch in the overlay. While paused,
   tailnet connections fail at once and everything else works normally.
 - **Turn it off completely:** in the **Sysmodules** overlay
@@ -131,6 +137,7 @@ All settings are optional. They take effect after a restart.
 | `control_url` | `https://controlplane.tailscale.com` | Your headscale URL, if you use headscale |
 | `magicdns` | `on` | `off` stops writing tailnet names to the hosts file |
 | `connect_notice` | `on` | `off` turns off the "Connected" toast at boot (as does the overlay switch) |
+| `update_check` | `on` | `off` stops checking GitHub for a newer release at boot (as does the overlay switch) |
 | `mitm` | `homebrew` | Which programs can reach the tailnet: `homebrew`, `off`, or `homebrew,sys-ftpd` (see below) |
 | `overlay_budget_kb` | `320` | Memory for tailnet sockets, shared by all apps (128–512). Raise it only if apps report "no buffer space". |
 | `ca_cert` | none | Extra CA certificate (DER) for a self-signed headscale |

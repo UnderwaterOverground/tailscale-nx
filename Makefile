@@ -28,7 +28,8 @@ e2e:
 	e2e/run-tests.sh
 
 # Host build of the C driver + FFI (the Switch app's code paths, on the Mac).
-HOST_C_SRCS := native/host/main.c native/driver/tsnx_driver.c native/driver/tsnx_app.c native/driver/tsnx_dns.c
+HOST_C_SRCS := native/host/main.c native/driver/tsnx_driver.c native/driver/tsnx_app.c native/driver/tsnx_dns.c \
+	native/driver/tsnx_update.c
 host-c: target/tsnx-c
 
 target/tsnx-c: $(HOST_C_SRCS) native/driver/*.h crates/tsnx-ffi/include/tsnx.h FORCE
