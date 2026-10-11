@@ -23,6 +23,12 @@ namespace ams::status {
     // A newer release (version without the "v") is out: a toast saying so.
     void AnnounceUpdate(const char *latest);
 
+    // The engine loop ran a round (engine thread); GetStatus reports how
+    // long ago, so a stuck engine shows as such in the overlay.
+    void EngineRan(u64 now_ns);
+    // Whether the console has an internet connection (engine thread).
+    void SetOffline(bool offline);
+
     // Engine events (engine thread, runtime lock held).
     void OnEvent(const TsnxEvent &ev);
 

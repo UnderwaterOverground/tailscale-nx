@@ -126,7 +126,7 @@ fn control_probe(url: &str, auth_key: Option<&str>) -> Result<(), String> {
     let mut s = net::Stream::connect(&target)?;
     s.write(&control::key_request(&target.host))?;
     let resp = s.read_to_end()?;
-    let control_key = control::parse_key_response(&resp).map_err(|e| format!("/key: {e:?}"))?;
+    let control_key = control::parse_key_response(&resp).map_err(|e| format!("/key: {e}"))?;
     println!("control key: mkey:{}", control::hex32(&control_key));
 
     let machine = tsnx_core::rng::bytes32().unwrap();

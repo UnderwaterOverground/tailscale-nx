@@ -34,6 +34,7 @@ tools/stage-sd.sh     # dist/sd: a ready-to-copy SD tree (Atmosphère, hekate, s
 make nro              # switch/app/tsnx-app.nro
 make host-c           # target/tsnx-c (C driver + FFI on the Mac)
 make interpose        # target/libtsnx_interpose.dylib + target/vsock-test
+make runtime-test     # the runtime's non-blocking pause and resume (links the shim)
 make e2e              # local tailnet + the full end-to-end suite (Docker)
 ```
 
@@ -44,6 +45,7 @@ make e2e              # local tailnet + the full end-to-end suite (Docker)
 - the socket virtualization suite and unmodified curl through the shim
 - a 50 Mbit/s UDP stream (Moonlight-like) and a TCP bulk upload through the shim
 - replacing an expired node key, both while running (auth key) and at startup (login URL)
+- losing the control server and getting it back (the engine's control events)
 
 Typical results on a Mac's Docker VM: 50 Mbit/s UDP at 0% loss; about 800 Mbit/s TCP up and 680 Mbit/s down.
 

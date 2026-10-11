@@ -178,6 +178,19 @@ namespace ams {
         // After a wake the tunnel needs a moment to re-handshake; lines sent
         // before then are lost, so hold them until this tick.
         constinit u64 g_tailnet_log_hold_until_ns = 0;
+        // The engine loop's last round, to log stalls (0: not since resuming;
+        // it doesn't run while suspended).
+        constinit u64 g_last_round_ns = 0;
+
+        // Runs a housekeeping step of the engine loop, logging it if it held
+        // the loop up (homebrew's tailnet sockets wait meanwhile).
+        template <class F>
+        void Timed(const char *what, F &&f) {
+            const u64 t0 = armTicksToNs(armGetSystemTick());
+            f();
+            const u64 ms = (armTicksToNs(armGetSystemTick()) - t0) / 1'000'000;
+            if (ms >= 500) Log("slow: %s took %llu ms", what, static_cast<unsigned long long>(ms));
+        }
 
         // Appends a line, dropping the oldest whole lines to make room.
         void QueueTailnetLog(const char *line, size_t n) {
@@ -466,6 +479,7 @@ namespace ams {
                 case TSNX_EVENT_ENDPOINTS: return "endpoints";
                 case TSNX_EVENT_PEER_PATH: return "path";
                 case TSNX_EVENT_NODE_KEY: return "node-key";
+                case TSNX_EVENT_CONTROL: return "control";
                 default: return "log";
             }
         }
@@ -1031,6 +1045,8 @@ namespace ams {
             g_tailnet_log_hold_until_ns = armTicksToNs(armGetSystemTick()) + 10'000'000'000ull;
             OpenUdpLogSocket();
             ip = 0;
+            g_last_round_ns = 0;
+            status::EngineRan(armTicksToNs(armGetSystemTick()));
         });
         if (!StartPowerHandling(*rt)) return;
         g_runtime = rt.get();
@@ -1058,6 +1074,12 @@ namespace ams {
         size_t heap_all_peak = 0;
         rt->Run([&](TsnxDriver *d) {
             const u64 now = armTicksToNs(armGetSystemTick());
+            // A round takes at most about a second (the poll timeout).
+            if (g_last_round_ns && now - g_last_round_ns > 3'000'000'000ull) {
+                Log("engine loop stalled: %llu ms since the last round", static_cast<unsigned long long>((now - g_last_round_ns) / 1'000'000));
+            }
+            g_last_round_ns = now;
+            status::EngineRan(now);
             // Whole-heap use (Rust, C++, C), sampled every round; the Rust
             // peak below is exact.
             const size_t heap_free = init::GetAllocator()->GetTotalFreeSize();
@@ -1080,14 +1102,16 @@ namespace ams {
                 stack_watch::Log();
             }
             FlushTailnetLog(engine);
-            StepUpdateCheck(now);
+            Timed("update check", [&] { StepUpdateCheck(now); });
             if (magicdns && hosts_dirty_since != 0 && now - hosts_dirty_since > 3'000'000'000ull) {
                 hosts_dirty_since = 0;
-                hosts::Update(engine);
+                Timed("hosts file update", [&] { hosts::Update(engine); });
             }
             if (now - last_check > (ip ? 5'000'000'000ull : 250'000'000ull)) {
                 last_check = now;
-                const u32 cur = NetworkUp() ? CurrentIp() : 0;
+                u32 cur = 0;
+                Timed("network check", [&] { cur = NetworkUp() ? CurrentIp() : 0; });
+                status::SetOffline(cur == 0);
                 if (cur != ip) {
                     Log("local address changed: %s", cur ? inet_ntoa(in_addr{cur}) : "(offline)");
                     if (cur && !ip) tsnx_engine_network_up(engine, tsnx_driver_now_ns());

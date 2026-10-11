@@ -196,6 +196,13 @@ impl ControlClient {
         self.updates.pop_front()
     }
 
+    /// Tests: as if session `id` were streaming the map.
+    #[cfg(test)]
+    pub(crate) fn force_polling(&mut self, id: ConnId) {
+        let conn = ControlConn::new("control.test", &[1; 32], &[4; 32], &[5; 32], CAPABILITY_VERSION).unwrap();
+        self.phase = Phase::Session { id, stream: None, conn, step: Step::Polling { stream: 1, status: 200, buf: Vec::new() } };
+    }
+
     pub fn is_polling(&self) -> bool {
         matches!(self.phase, Phase::Session { step: Step::Polling { status: 200, .. }, .. })
     }
@@ -348,13 +355,17 @@ impl ControlClient {
         self.now = now;
         match &self.phase {
             Phase::FetchKey { id: cur, response, .. } if *cur == id => {
-                // /key uses Connection: close; EOF ends the response.
+                // /key uses Connection: close; EOF ends the response. Nothing
+                // at all means the connection failed (no network, DNS, refused).
+                if response.is_empty() {
+                    return self.fail("couldn't reach the control server");
+                }
                 match parse_key_response(response) {
                     Ok(key) => {
                         self.control_key = Some(key);
                         self.open_session();
                     }
-                    Err(e) => self.fail(&format!("/key: {e:?}")),
+                    Err(e) => self.fail(&format!("/key: {e}")),
                 }
             }
             Phase::Session { id: cur, .. } if *cur == id => self.fail("control connection closed"),
@@ -705,6 +716,19 @@ mod tests {
         // Already connecting: a second call changes nothing.
         c.retry_now(back);
         assert!(drain(&mut c).is_empty());
+    }
+
+    #[test]
+    fn a_failed_connection_is_not_a_bad_reply() {
+        let now = Instant::from_nanos(1_000_000_000);
+        let mut c = client(now);
+        c.handle_timeout(c.next_deadline());
+        let Some(Io::Connect { id, .. }) = drain(&mut c).into_iter().next() else { panic!("no connect") };
+        c.on_closed(id, now);
+        let errors: Vec<_> = core::iter::from_fn(|| c.poll_update())
+            .filter_map(|u| if let Update::Error(e) = u { Some(e) } else { None })
+            .collect();
+        assert_eq!(errors, ["couldn't reach the control server"]);
     }
 
     #[test]

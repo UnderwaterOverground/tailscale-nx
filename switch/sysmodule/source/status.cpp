@@ -33,6 +33,13 @@ namespace ams::status {
         constinit std::atomic<bool> g_paused = false;
         constinit bool g_connect_notice = true;   // config.ini connect_notice
         constinit bool g_announced_connected = false;  // once per boot
+        // When the control server's map stream went away, 0 while it's up:
+        // "Connected" turns into "Reconnecting" after ReconnectingAfterNs.
+        constinit u64 g_control_lost_ns = 0;
+        constexpr u64 ReconnectingAfterNs = 10'000'000'000ull;
+        constinit std::atomic<u64> g_engine_ran_ns = 0;
+
+        u64 NowNs() { return armTicksToNs(armGetSystemTick()); }
 
         bool Exists(const char *path, fs::DirectoryEntryType want) {
             fs::DirectoryEntryType t;
@@ -215,6 +222,10 @@ namespace ams::status {
             case TSNX_EVENT_HOME_DERP:
                 g_status.home_derp = ev.value;
                 break;
+            case TSNX_EVENT_CONTROL:
+                if (ev.value) g_control_lost_ns = 0;
+                else if (g_control_lost_ns == 0) g_control_lost_ns = NowNs();
+                break;
             case TSNX_EVENT_PEER_PATH:
                 if (ev.value) g_status.flags |= TSNX_CTL_FLAG_DIRECT;
                 break;
@@ -271,7 +282,25 @@ namespace ams::status {
 
     TsnxCtlStatus Get() {
         std::scoped_lock lk(g_mutex);
-        return g_status;
+        TsnxCtlStatus st = g_status;
+        const u64 now = NowNs();
+        if (st.state == TSNX_CTL_CONNECTED && g_control_lost_ns && now - g_control_lost_ns > ReconnectingAfterNs) {
+            st.state = TSNX_CTL_CONNECTING;
+        }
+        const u64 ran = g_engine_ran_ns;
+        const u64 idle_s = ran && now > ran ? (now - ran) / 1'000'000'000ull : 0;
+        if (idle_s >= 3 && st.state != TSNX_CTL_PAUSED && st.state != TSNX_CTL_STOPPING) st.engine_stalled_s = static_cast<u32>(idle_s);
+        return st;
+    }
+
+    void EngineRan(u64 now_ns) {
+        g_engine_ran_ns = now_ns;
+    }
+
+    void SetOffline(bool offline) {
+        std::scoped_lock lk(g_mutex);
+        if (offline) g_status.flags |= TSNX_CTL_FLAG_OFFLINE;
+        else g_status.flags &= ~TSNX_CTL_FLAG_OFFLINE;
     }
 
     size_t GetLoginUrl(char *out, size_t cap) {
@@ -308,17 +337,16 @@ namespace ams::status {
             } else {
                 g_status.state = g_login_url[0] ? TSNX_CTL_NEEDS_LOGIN : TSNX_CTL_STARTING;  // until re-authorized
                 static_cast<void>(fs::DeleteFile(PausedPath));
+                // The loop didn't run while paused: that isn't a stall.
+                g_engine_ran_ns = NowNs();
             }
         }
-        // Outside the status lock: suspending waits for the engine loop, which
-        // takes it for events.
-        if (paused) {
-            if (!rt->Suspend(::tsnx::Runtime::kPaused, std::chrono::milliseconds(3000))) Log("status: engine did not stop in time");
-            Log("status: Tailscale paused");
-        } else {
-            rt->Resume(::tsnx::Runtime::kPaused);
-            Log("status: Tailscale resumed");
-        }
+        // Without waiting for the engine loop: tsnx:ctl must always answer,
+        // even while the loop is busy or stuck. Homebrew's tailnet sockets
+        // fail at once anyway (bsd_mitm checks IsPaused), and the loop
+        // closes or reopens the engine's own within a second.
+        rt->RequestSuspended(::tsnx::Runtime::kPaused, paused);
+        Log("status: Tailscale %s", paused ? "paused" : "resumed");
     }
 
 }
