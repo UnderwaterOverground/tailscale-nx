@@ -88,6 +88,7 @@ namespace {
     u64 g_phase_since = 0;  // system tick
     bool g_we_started = false;
     char g_msg[2][64] = {};  // the outcome of the last stop or start
+    bool g_msg_problem = false;  // drawn in red
 
     void SetPhase(Phase p) {
         g_phase = p;
@@ -96,9 +97,17 @@ namespace {
 
     u64 PhaseSeconds() { return armTicksToNs(armGetSystemTick() - g_phase_since) / 1'000'000'000ull; }
 
+    // A stop or start that didn't happen (shown in red).
     void Say(const char *first, const char *second = "") {
         std::snprintf(g_msg[0], sizeof g_msg[0], "%s", first);
         std::snprintf(g_msg[1], sizeof g_msg[1], "%s", second);
+        g_msg_problem = true;
+    }
+
+    // Progress or success.
+    void Note(const char *first, const char *second = "") {
+        Say(first, second);
+        g_msg_problem = false;
     }
 
     // Stop can take a few seconds (it waits for the engine and the system),
@@ -134,7 +143,7 @@ namespace {
             Say("Couldn't stop it (out of memory).");
             return;
         }
-        Say("");
+        Note("");
         SetPhase(Phase::Stopping);
     }
 
@@ -209,7 +218,7 @@ namespace {
             Say(line, "Restarting the console starts it.");
             return;
         }
-        Say("");
+        Note("");
         g_we_started = true;
         SetPhase(Phase::Starting);
     }
@@ -270,9 +279,9 @@ namespace {
                 if (!SysmoduleRunning() && !ServiceExists(TSNX_CTL_SERVICE)) {
                     SetPhase(Phase::Idle);
                     ReadWhyNotRunning();
-                    Say("Stopped. It starts again at boot,", "or with Start tailscale-nx above.");
+                    Note("Stopped. It starts again at boot,", "or with Start tailscale-nx above.");
                 } else if (PhaseSeconds() >= 10) {
-                    Say("Still stopping...");
+                    Note("Still stopping...");
                 }
                 break;
             case Phase::Starting:
@@ -469,8 +478,9 @@ namespace {
 
     // The outcome of the last stop or start.
     void DrawMessage(tsl::gfx::Renderer *r, s32 x, s32 y, s32 w, s32 h) {
-        r->drawString(g_msg[0], false, x + 20, y + 22, 15, r->a(White));
-        r->drawString(g_msg[1], false, x + 20, y + 42, 15, r->a(White));
+        const tsl::Color c = g_msg_problem ? Red : White;
+        r->drawString(g_msg[0], false, x + 20, y + 22, 15, r->a(c));
+        r->drawString(g_msg[1], false, x + 20, y + 42, 15, r->a(c));
     }
 
     void DrawTip(tsl::gfx::Renderer *r, s32 x, s32 y, s32 w, s32 h) {
