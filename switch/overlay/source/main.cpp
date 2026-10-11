@@ -3,6 +3,8 @@
 #define TESLA_INIT_IMPL
 #include <tesla.hpp>
 
+#include <dirent.h>
+
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -602,10 +604,29 @@ namespace {
             u32 m_frames = 0;
     };
 
+    // Ultrahand shows notifications (Taildrop, "Connected") only while its
+    // own menu is the loaded overlay, and a hidden Tesla overlay stays loaded.
+    // With Ultrahand installed, hiding exits instead, back to a hidden menu.
+    bool g_exit_on_hide = false;
+
     class TailscaleOverlay : public tsl::Overlay {
         public:
             void initServices() override {
                 OpenCtl();
+                tsl::hlp::doWithSDCardHandle([] {
+                    if (DIR *d = opendir("sdmc:/config/ultrahand/notifications")) {
+                        g_exit_on_hide = true;
+                        closedir(d);
+                    }
+                });
+            }
+
+            // From the combo, HOME or a touch outside us (Tesla's input thread).
+            void onHide() override {
+                if (!g_exit_on_hide) return;
+                // Without --skipCombo the menu starts hidden, as at boot.
+                envSetNextLoad("sdmc:/switch/.overlays/ovlmenu.ovl", "ovlmenu.ovl");
+                close();
             }
 
             void exitServices() override {
