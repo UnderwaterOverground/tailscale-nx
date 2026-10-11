@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "log.hpp"
+#include "memory.hpp"
 #include "runtime.hpp"
 #include "status.hpp"
 
@@ -20,7 +21,7 @@ namespace ams::status {
         constexpr const char NotifyPath[] = "sdmc:/config/ultrahand/notifications/tailscale-nx-login.notify";
         constexpr const char ConnectedNotifyPath[] = "sdmc:/config/ultrahand/notifications/tailscale-nx-connected.notify";
         constexpr const char UpdateNotifyPath[] = "sdmc:/config/ultrahand/notifications/tailscale-nx-update.notify";
-        // The overlay's "Notice when connected" switch: present = off.
+        // The overlay's "Connection notice" switch: present = off.
         constexpr const char NoNoticePath[] = "sdmc:/config/tailscale-nx/no-connect-notice";
         constexpr const char UltrahandConfig[] = "sdmc:/config/ultrahand/config.ini";
 
@@ -270,8 +271,15 @@ namespace ams::status {
     }
 
     TsnxCtlStatus Get() {
-        std::scoped_lock lk(g_mutex);
-        return g_status;
+        TsnxCtlStatus s;
+        {
+            std::scoped_lock lk(g_mutex);
+            s = g_status;
+        }
+        s.memory_kb = static_cast<u32>(memory::Own() / 1024);
+        u64 free_bytes = 0, total = 0;
+        if (memory::SystemPool(&free_bytes, &total)) s.system_free_kb = static_cast<u32>(free_bytes / 1024);
+        return s;
     }
 
     size_t GetLoginUrl(char *out, size_t cap) {

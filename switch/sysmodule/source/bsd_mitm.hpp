@@ -28,9 +28,11 @@ namespace ams::bsd_mitm {
     //
     // `titles`: config.ini's mitm_titles, program IDs (16 hex digits, 0x
     // optional, comma or space separated) served like homebrew. Home-screen
-    // forwarders run as their own title rather than through hbloader, so
-    // only this lets them in. Only with the homebrew scope (mitm=off means
-    // no MITM at all); malformed entries are logged and skipped.
+    // forwarders run as their own title rather than through hbloader; the
+    // running application is served anyway when its ID is outside
+    // Nintendo's 01... range, so this is for forwarders inside it. Only
+    // with the homebrew scope (mitm=off means no MITM at all); malformed
+    // entries are logged and skipped.
     bool Start(::tsnx::Runtime &rt, Scope scope, bool sys_ftpd, const char *titles);
 
     // Removes the MITM registration from sm. Must run before this process

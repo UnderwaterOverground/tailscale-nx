@@ -36,7 +36,7 @@ without opening ports on your router.
 - **Respects your tailnet's access rules (ACLs)** for incoming connections.
 - **Optional:** reach the Switch's [sys-ftpd](https://github.com/cathery/sys-ftpd)
   over the tailnet.
-- **Small:** about 2.6 MB of memory.
+- **Small:** exactly 2.5 MB of memory, fixed when it starts.
 
 ## Requirements
 
@@ -73,8 +73,9 @@ and use that instead, which is fine. Away from home, it uses the tailnet.
 
 ## Known limitations
 
-- **Homebrew only**: apps launched from hbmenu, and home-screen forwarders
-  only if their title IDs are listed in `mitm_titles` (see the
+- **Homebrew only**: apps launched from hbmenu or another homebrew launcher,
+  and home-screen forwarders (those with title IDs starting `01` need
+  listing in `mitm_titles`, see the
   [setup guide](docs/SETUP.md#home-screen-forwarders)). Games and Nintendo's
   apps don't use the tailnet.
 - **No exit nodes:** only tailnet addresses and your tailnet's subnet routes

@@ -91,6 +91,79 @@ namespace ams::bsd_mitm {
             return std::find(g_titles, g_titles + g_num_titles, program_id) != g_titles + g_num_titles;
         }
 
+        // ---- forwarders, without mitm_titles ---------------------------------
+        //
+        // A forwarder is an installed app that loads an NRO itself, so it
+        // lacks the homebrew-loader mark; but its program ID is outside
+        // Nintendo's 01... range. Homebrew sysmodules use such IDs too, so it
+        // must also be the running application, which only pm knows. sm waits
+        // on our answer and pm may be waiting on sm (it registers each process
+        // it launches), so pm is asked from another thread, and an answer
+        // later than AppCheckTimeout counts as "no" rather than a deadlock.
+        constexpr TimeSpan AppCheckTimeout = TimeSpan::FromMilliSeconds(50);
+        constexpr size_t AppCheckStackSize = 0x2000;  // Log needs about 2 KB
+        alignas(os::ThreadStackAlignment) constinit u8 g_app_check_stack[AppCheckStackSize];
+        constinit os::ThreadType g_app_check_thread;
+        constinit os::EventType g_app_check_request;
+        constinit os::EventType g_app_check_answer;
+        constinit bool g_app_check = false;                     // pm:dmnt open and the thread running
+        constinit std::atomic<bool> g_app_check_busy = false;   // a request is with pm
+        constinit std::atomic<bool> g_app_check_waiting = false;
+        constinit std::atomic<u64> g_app_check_program = 0;     // for the log, if pm answers late
+        constinit std::atomic<u64> g_app_pid = 0;               // pm's last answer (pids aren't reused)
+
+        bool IsNintendoId(u64 program_id) { return (program_id >> 56) == 0x01; }
+
+        void AppCheckThread(void *) {
+            while (true) {
+                os::WaitEvent(std::addressof(g_app_check_request));
+                u64 pid = 0;
+                if (R_FAILED(pmdmntGetApplicationProcessId(std::addressof(pid)))) pid = 0;  // no application
+                g_app_pid = pid;
+                os::SignalEvent(std::addressof(g_app_check_answer));
+                // Off sm's path, so logging is safe here.
+                if (!g_app_check_waiting.exchange(false)) {
+                    Log("bsd mitm: pm answered too late; program %016lx isn't served (start it again)", g_app_check_program.load());
+                }
+                g_app_check_busy = false;
+            }
+        }
+
+        // On libstratosphere's query thread, while sm waits: never block long.
+        bool IsRunningApplication(const sm::MitmProcessInfo &c) {
+            if (!g_app_check) return false;
+            if (g_app_pid.load() == c.process_id.value) return true;
+            bool idle = false;
+            if (!g_app_check_busy.compare_exchange_strong(idle, true)) return false;  // still waiting on pm
+            g_app_check_program = c.program_id.value;
+            g_app_check_waiting = true;
+            os::ClearEvent(std::addressof(g_app_check_answer));
+            os::SignalEvent(std::addressof(g_app_check_request));
+            if (!os::TimedWaitEvent(std::addressof(g_app_check_answer), AppCheckTimeout)) {
+                if (g_app_check_waiting.exchange(false)) return false;  // the thread logs the late answer
+            }
+            return g_app_pid.load() == c.process_id.value;
+        }
+
+        void StartAppCheck(s32 priority) {
+            if (R_FAILED(pmdmntInitialize())) {
+                Log("bsd mitm: cannot open pm:dmnt; forwarders need mitm_titles");
+                return;
+            }
+            os::InitializeEvent(std::addressof(g_app_check_request), false, os::EventClearMode_AutoClear);
+            os::InitializeEvent(std::addressof(g_app_check_answer), false, os::EventClearMode_AutoClear);
+            stack_watch::Paint(g_app_check_stack, AppCheckStackSize);
+            if (R_FAILED(os::CreateThread(std::addressof(g_app_check_thread), AppCheckThread, nullptr, g_app_check_stack, AppCheckStackSize, priority))) {
+                Log("bsd mitm: cannot create the forwarder check thread; forwarders need mitm_titles");
+                pmdmntExit();
+                return;
+            }
+            os::SetThreadNamePointer(std::addressof(g_app_check_thread), "tsnx.AppCheck");
+            stack_watch::Add("appcheck", std::addressof(g_app_check_thread));
+            os::StartThread(std::addressof(g_app_check_thread));
+            g_app_check = true;
+        }
+
         // For a deliberate stop (PrepareStop): sessions alive now, and the
         // sessions sm was told to send us versus those acknowledged. sm's
         // queries arrive on libstratosphere's own query thread.
@@ -387,6 +460,7 @@ namespace ams::bsd_mitm {
             }
 
             ~BsdMitmService() {
+                FlushRepeats();
                 m_state.reset();  // its sockets close while the session still counts
                 if (m_client_info.program_id.value == SysFtpdProgramId) g_live_sys_ftpd_sessions--;
                 g_live_sessions--;
@@ -394,8 +468,11 @@ namespace ams::bsd_mitm {
 
             static bool ShouldMitm(const sm::MitmProcessInfo &c) {
                 // sys-ftpd builds whose libnx prefers bsd:u come through here.
-                return AnswerQuery((g_scope == Scope::Homebrew && (c.override_status.IsHbl() || IsListedTitle(c.program_id.value))) ||
-                                   (g_sys_ftpd && c.program_id.value == SysFtpdProgramId));
+                if (g_sys_ftpd && c.program_id.value == SysFtpdProgramId) return AnswerQuery(true);
+                if (g_scope != Scope::Homebrew) return AnswerQuery(false);
+                if (c.override_status.IsHbl() || IsListedTitle(c.program_id.value)) return AnswerQuery(true);
+                // Asking pm can take a moment, so only for possible forwarders.
+                return AnswerQuery(!IsNintendoId(c.program_id.value) && c.program_id.value != SysFtpdProgramId && IsRunningApplication(c));
             }
 
         private:
@@ -411,14 +488,35 @@ namespace ams::bsd_mitm {
 
             // Reply, logging real failures of calls that set sockets up
             // (would-block and in-progress are normal), a few per session.
+            // The same failure again and again (Moonlight asking for ever
+            // smaller buffers) is one line plus a count.
             Result ReplyLogged(const char *call, s32 fd, sf::Out<s32> &ret, sf::Out<s32> &err, const VResult &r) {
-                if (r.ret < 0 && r.err != 11 && r.err != 115 && m_failures_logged < 32) {
-                    m_failures_logged++;
-                    Log("bsd mitm: pid %lu %s(fd %d) failed: errno %d", m_client_info.process_id.value, call, fd, r.err);
+                if (r.ret < 0 && r.err != 11 && r.err != 115) {
+                    if (call == m_last_call && fd == m_last_fd && r.err == m_last_err) {
+                        m_repeats++;
+                    } else {
+                        FlushRepeats();
+                        if (m_failures_logged < 32) {
+                            m_failures_logged++;
+                            Log("bsd mitm: pid %lu %s(fd %d) failed: errno %d", m_client_info.process_id.value, call, fd, r.err);
+                        }
+                        m_last_call = call, m_last_fd = fd, m_last_err = r.err;
+                    }
+                } else if (r.ret >= 0 && call == m_last_call && fd == m_last_fd) {
+                    FlushRepeats();
+                    m_last_call = nullptr;
                 }
                 return Reply(ret, err, r);
             }
+            void FlushRepeats() {
+                if (m_repeats > 0) Log("bsd mitm: pid %lu %s(fd %d): %d more like it", m_client_info.process_id.value, m_last_call, m_last_fd, m_repeats);
+                m_repeats = 0;
+            }
             int m_failures_logged = 0;
+            const char *m_last_call = nullptr;  // the last failure logged (string literals)
+            s32 m_last_fd = -1;
+            int m_last_err = 0;
+            int m_repeats = 0;
 
         public:
             Result Socket(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 domain, s32 type, s32 protocol) {
@@ -873,13 +971,14 @@ namespace ams::bsd_mitm {
         g_scope = scope;
         g_sys_ftpd = sys_ftpd;
         ParseTitles(titles);
+        const s32 priority = os::GetThreadCurrentPriority(os::GetCurrentThread());
+        StartAppCheck(priority);  // before sm can send us queries
         if (const Result rc = g_server_manager.RegisterMitmServer<BsdMitmService>(PortIndex_BsdU, BsdUName); R_FAILED(rc)) {
             Log("bsd mitm: registering failed: 0x%x", rc.GetValue());
             return false;
         }
         g_installed = true;
 
-        const s32 priority = os::GetThreadCurrentPriority(os::GetCurrentThread());
         for (size_t i = 0; i < NumThreads; i++) {
             stack_watch::Paint(g_thread_stacks[i], ThreadStackSize);
             if (R_FAILED(os::CreateThread(g_threads + i, LoopServerThread, nullptr, g_thread_stacks[i], ThreadStackSize, priority))) {
@@ -891,7 +990,8 @@ namespace ams::bsd_mitm {
             stack_watch::Add("mitm", g_threads + i);
             os::StartThread(g_threads + i);
         }
-        Log("bsd mitm: active for homebrew (real pointer buffer 0x%zx, %zu threads)", real_pointer_buffer, NumThreads);
+        Log("bsd mitm: active for homebrew%s (real pointer buffer 0x%zx, %zu threads)", g_app_check ? " and forwarders" : "", real_pointer_buffer,
+            NumThreads);
         if (g_num_titles > 0) {
             char list[MaxTitles * 18];
             int n = 0;

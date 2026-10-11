@@ -10,7 +10,7 @@
 //                                    mitm=homebrew|homebrew,sys-ftpd|off,
 //                                    mitm_titles=<program IDs>,
 //                                    magicdns=on|off,
-//                                    overlay_budget_kb=<128..512>,
+//                                    overlay_budget_kb=<128..384>,
 //                                    connect_notice=on|off, taildrop=on|off,
 //                                    accept_routes=on|off, update_check=on|off)
 //   config/tailscale-nx/state        node keys, shared with the app
@@ -55,6 +55,8 @@ extern "C" {
 #include "runtime.hpp"
 #include "vsock.hpp"
 #include "stack_watch.hpp"
+#include "heap_size.h"
+#include "memory.hpp"
 #include "status.hpp"
 #include "taildrop.hpp"
 
@@ -66,6 +68,15 @@ namespace ams {
         constexpr const char ConfigPath[] = "sdmc:/config/tailscale-nx/config.ini";
         constexpr const char StatePath[] = "sdmc:/config/tailscale-nx/state";
         constexpr const char DisabledPath[] = "sdmc:/config/tailscale-nx/disabled";
+        // Why we didn't start this time (too little system memory), for the
+        // overlay; removed once we do start.
+        constexpr const char NotStartedPath[] = "sdmc:/config/tailscale-nx/not_started";
+        // System memory left for everything launched after us: Nintendo
+        // starts some modules on demand, and they fail without it.
+        constexpr u64 MinSystemFree = 1_MB;
+        // How long after our start to watch the system's free memory (boot
+        // and the HOME menu starting), for the log.
+        constexpr u64 BootLowWindowNs = 120'000'000'000ull;
         constexpr const char CrashedPath[] = "sdmc:/config/tailscale-nx/crashed";
         constexpr const char StartingPath[] = "sdmc:/config/tailscale-nx/starting";
         constexpr const char SleepingPath[] = "sdmc:/config/tailscale-nx/sleeping";
@@ -85,11 +96,13 @@ namespace ams {
         constexpr const char OldLogPath[] = "sdmc:/config/tailscale-nx/sysmodule.log.1";
         constexpr s64 LogMaxSize = 512_KB;
 
-        // Heap for the engine (Rust core + driver) and our own allocations.
-        // Measured on the console: the engine peaked at 332 KB with 28 peers
-        // (before the lean netmap decoder). Homebrew sockets on the tailnet
-        // add overlay buffers, capped at 448 KB by the netstack's budget.
-        constexpr size_t MallocBufferSize = 1_MB;
+        // Heap for the engine (Rust core + driver) and our own allocations,
+        // sized at build time so the whole sysmodule takes exactly 2.5 MB
+        // (heap_size.h). Measured on the console: everything peaked at
+        // 629 KB with the default 320 KB overlay budget (a Moonlight
+        // connection burst).
+        constexpr size_t MallocBufferSize = TSNX_HEAP_SIZE;
+        static_assert(MallocBufferSize % os::MemoryPageSize == 0);
         alignas(os::MemoryPageSize) constinit u8 g_malloc_buffer[MallocBufferSize];
 
         // The engine's own sockets: control + DERP (TCP), WireGuard + DNS + log
@@ -895,6 +908,26 @@ namespace ams {
             Log("%s exists: staying disabled", DisabledPath);
             return;
         }
+        // Our memory was taken when we were launched; if that left the
+        // system short, give it back now (exiting), before anything needs it.
+        // Not a failure for the crash guard. Only useful for a start from the
+        // overlay: at boot most other sysmodules start after us (about 14 MB
+        // later on a typical setup), so plenty is still free here.
+        u64 sys_free = 0, sys_total = 0;
+        const bool pool_known = memory::SystemPool(&sys_free, &sys_total);
+        Log("memory: %lu KB (fixed); system memory free: %lu KB of %lu KB", static_cast<unsigned long>(memory::Own() / 1024),
+            static_cast<unsigned long>(sys_free / 1024), static_cast<unsigned long>(sys_total / 1024));
+        if (pool_known && sys_free < MinSystemFree) {
+            char why[200];
+            const int n = util::SNPrintf(why, sizeof why,
+                                         "Too little system memory: other sysmodules leave %lu KB free with tailscale-nx running, "
+                                         "and it keeps %lu KB free for the system.\n",
+                                         static_cast<unsigned long>(sys_free / 1024), static_cast<unsigned long>(MinSystemFree / 1024));
+            Log("%.*s; not starting", n - 1, why);
+            WriteWholeFile(NotStartedPath, why, static_cast<size_t>(n));
+            return;
+        }
+        static_cast<void>(fs::DeleteFile(NotStartedPath));
         if (!PassesCrashGuard()) return;
 
         // Services, initialized here so a failure is a logged, clean exit.
@@ -938,7 +971,10 @@ namespace ams {
         // cheap IPC per 100 ms, so we start soon after Wi-Fi does.
         if (!NetworkUp()) {
             Log("waiting for the network");
-            while (!NetworkUp()) os::SleepThread(TimeSpan::FromMilliSeconds(100));
+            while (!NetworkUp()) {
+                memory::SampleBootLow(armTicksToNs(armGetSystemTick()), BootLowWindowNs);
+                os::SleepThread(TimeSpan::FromMilliSeconds(100));
+            }
         }
         u32 ip = CurrentIp();
         Log("network up, local address %s", inet_ntoa(in_addr{ip}));
@@ -1003,9 +1039,9 @@ namespace ams {
         tsnx_engine_set_accept_routes(engine, accept_routes);
         const bool magicdns = std::strcmp(cfg.magicdns, "off") != 0;
         if (cfg.overlay_budget_kb[0]) {
-            // Bounded by the sysmodule's 1 MB heap: the engine and the
-            // MITM need about 300 KB of it besides the overlay buffers.
-            const unsigned long kb = std::clamp(std::strtoul(cfg.overlay_budget_kb, nullptr, 10), 128ul, 512ul);
+            // Bounded by the sysmodule's heap (heap_size.h): the engine and
+            // the MITM need about 300 KB of it besides the overlay buffers.
+            const unsigned long kb = std::clamp(std::strtoul(cfg.overlay_budget_kb, nullptr, 10), 128ul, 384ul);
             tsnx_net_set_budget(engine, kb * 1024);
             Log("overlay buffer budget: %lu KB", kb);
         }
@@ -1034,8 +1070,8 @@ namespace ams {
         });
         if (!StartPowerHandling(*rt)) return;
         g_runtime = rt.get();
-        // mitm=homebrew (default), off, or homebrew,sys-ftpd; mitm_titles
-        // adds forwarders to the homebrew scope.
+        // mitm=homebrew (default), off, or homebrew,sys-ftpd. Homebrew
+        // includes forwarders (non-01 IDs); mitm_titles adds others.
         const bool mitm = bsd_mitm::Start(*rt, std::strcmp(cfg.mitm, "off") == 0 ? bsd_mitm::Scope::Off : bsd_mitm::Scope::Homebrew,
                                           std::strstr(cfg.mitm, "sys-ftpd") != nullptr, cfg.mitm_titles);
 
@@ -1058,6 +1094,7 @@ namespace ams {
         size_t heap_all_peak = 0;
         rt->Run([&](TsnxDriver *d) {
             const u64 now = armTicksToNs(armGetSystemTick());
+            memory::SampleBootLow(now, BootLowWindowNs);
             // Whole-heap use (Rust, C++, C), sampled every round; the Rust
             // peak below is exact.
             const size_t heap_free = init::GetAllocator()->GetTotalFreeSize();

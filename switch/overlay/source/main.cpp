@@ -3,6 +3,8 @@
 #define TESLA_INIT_IMPL
 #include <tesla.hpp>
 
+#include <dirent.h>
+
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -25,7 +27,9 @@ namespace {
     bool ServiceExists(const char *name) {
         u8 has = 0;
         const SmServiceName sn = smEncodeName(name);
-        return R_SUCCEEDED(tipcDispatchInOut(smGetServiceSessionTipc(), 65100, sn, has)) && (has & 1);
+        Result rc = 0;
+        tsl::hlp::doWithSmSession([&] { rc = tipcDispatchInOut(smGetServiceSessionTipc(), 65100, sn, has); });  // see OpenCtl
+        return R_SUCCEEDED(rc) && (has & 1);
     }
 
     bool CtlGetStatus(TsnxCtlStatus *out) {
@@ -52,9 +56,12 @@ namespace {
         g_status_ok = false;
     }
 
-    // Only once the service exists (see ServiceExists).
+    // Only once the service exists (see ServiceExists). Tesla keeps no sm
+    // session open after start-up, so open one around each use.
     void OpenCtl() {
-        if (!g_have_ctl) g_have_ctl = ServiceExists(TSNX_CTL_SERVICE) && R_SUCCEEDED(smGetService(&g_ctl, TSNX_CTL_SERVICE));
+        if (g_have_ctl) return;
+        tsl::hlp::doWithSmSession(
+            [] { g_have_ctl = ServiceExists(TSNX_CTL_SERVICE) && R_SUCCEEDED(smGetService(&g_ctl, TSNX_CTL_SERVICE)); });
     }
 
     // ---- stop and start ------------------------------------------------------
@@ -83,6 +90,7 @@ namespace {
     u64 g_phase_since = 0;  // system tick
     bool g_we_started = false;
     char g_msg[2][64] = {};  // the outcome of the last stop or start
+    bool g_msg_problem = false;  // drawn in red
 
     void SetPhase(Phase p) {
         g_phase = p;
@@ -91,9 +99,17 @@ namespace {
 
     u64 PhaseSeconds() { return armTicksToNs(armGetSystemTick() - g_phase_since) / 1'000'000'000ull; }
 
+    // A stop or start that didn't happen (shown in red).
     void Say(const char *first, const char *second = "") {
         std::snprintf(g_msg[0], sizeof g_msg[0], "%s", first);
         std::snprintf(g_msg[1], sizeof g_msg[1], "%s", second);
+        g_msg_problem = true;
+    }
+
+    // Progress or success.
+    void Note(const char *first, const char *second = "") {
+        Say(first, second);
+        g_msg_problem = false;
     }
 
     // Stop can take a few seconds (it waits for the engine and the system),
@@ -129,7 +145,7 @@ namespace {
             Say("Couldn't stop it (out of memory).");
             return;
         }
-        Say("");
+        Note("");
         SetPhase(Phase::Stopping);
     }
 
@@ -185,7 +201,8 @@ namespace {
                 std::fclose(f);
             }
         });
-        Result rc = pmshellInitialize();
+        Result rc = 0;
+        tsl::hlp::doWithSmSession([&rc] { rc = pmshellInitialize(); });  // see OpenCtl
         if (R_SUCCEEDED(rc)) {
             const NcmProgramLocation loc = {.program_id = SysmoduleProgramId, .storageID = NcmStorageId_None};
             u64 pid = 0;
@@ -200,10 +217,10 @@ namespace {
             }
             char line[64];
             std::snprintf(line, sizeof line, "Couldn't start it (error 0x%x).", rc);
-            Say(line);
+            Say(line, "Restarting the console starts it.");
             return;
         }
-        Say("");
+        Note("");
         g_we_started = true;
         SetPhase(Phase::Starting);
     }
@@ -215,6 +232,7 @@ namespace {
     constexpr const char CrashedPath[] = "sdmc:/config/tailscale-nx/crashed";
     constexpr const char Boot2Path[] = "sdmc:/atmosphere/contents/4200000000005453/flags/boot2.flag";
     char g_crashed[160] = {};   // first line of the crash guard's reason
+    char g_not_started[200] = {};  // why it declined to start (too little memory)
     bool g_no_boot_flag = false;
     bool g_disabled = false;
 
@@ -224,6 +242,11 @@ namespace {
             if (FILE *f = std::fopen(CrashedPath, "r")) {
                 if (!std::fgets(g_crashed, sizeof g_crashed, f) || !g_crashed[0]) std::snprintf(g_crashed, sizeof g_crashed, "repeated failures");
                 g_crashed[std::strcspn(g_crashed, "\r\n")] = 0;
+                std::fclose(f);
+            }
+            g_not_started[0] = 0;
+            if (FILE *f = std::fopen("sdmc:/config/tailscale-nx/not_started", "r")) {
+                if (std::fgets(g_not_started, sizeof g_not_started, f)) g_not_started[std::strcspn(g_not_started, "\r\n")] = 0;
                 std::fclose(f);
             }
             FILE *b = std::fopen(Boot2Path, "r");
@@ -258,9 +281,9 @@ namespace {
                 if (!SysmoduleRunning() && !ServiceExists(TSNX_CTL_SERVICE)) {
                     SetPhase(Phase::Idle);
                     ReadWhyNotRunning();
-                    Say("Stopped. It starts again at boot,", "or with Start tailscale-nx above.");
+                    Note("Stopped. It starts again at boot,", "or with Start tailscale-nx above.");
                 } else if (PhaseSeconds() >= 10) {
-                    Say("Still stopping...");
+                    Note("Still stopping...");
                 }
                 break;
             case Phase::Starting:
@@ -381,6 +404,10 @@ namespace {
                 if (why[cut]) std::snprintf(second, sizeof second, "%s", why + cut + (why[cut] == ' '));
                 r->drawString(first, false, x + 20, y + 98, 15, r->a(Grey));
                 if (second[0]) r->drawString(second, false, x + 20, y + 116, 15, r->a(Grey));
+            } else if (g_not_started[0]) {
+                // "Too little system memory: other sysmodules leave N KB free ..."
+                r->drawString("It didn't start: too little system memory.", false, x + 20, y + 75, 17, r->a(Grey));
+                r->drawString("Other sysmodules use the rest; turn one off.", false, x + 20, y + 100, 17, r->a(Grey));
             } else if (g_disabled) {
                 r->drawString("config/tailscale-nx/disabled keeps it off.", false, x + 20, y + 75, 17, r->a(Grey));
                 r->drawString("Delete that file to start it.", false, x + 20, y + 100, 17, r->a(Grey));
@@ -438,6 +465,12 @@ namespace {
         if (g_status.flags & TSNX_CTL_FLAG_MITM) line("Homebrew apps can reach tailnet addresses.", White);
         if (g_status.flags & TSNX_CTL_FLAG_MAGICDNS) line("Tailnet names resolve (e.g. in Moonlight).", White);
         if (g_status.state == TSNX_CTL_PAUSED) line("Paused: tailnet connections fail until resumed.", Grey);
+        if (g_status.memory_kb) {
+            char mem[96];
+            std::snprintf(mem, sizeof mem, "Memory: %u.%u MB. System free: %u.%u MB.", g_status.memory_kb / 1024,
+                          g_status.memory_kb % 1024 * 10 / 1024, g_status.system_free_kb / 1024, g_status.system_free_kb % 1024 * 10 / 1024);
+            line(mem, Grey);
+        }
         if (g_last_error[0] && g_status.state != TSNX_CTL_CONNECTED) {
             ty += 8;
             line("Last error:", Grey);
@@ -447,8 +480,9 @@ namespace {
 
     // The outcome of the last stop or start.
     void DrawMessage(tsl::gfx::Renderer *r, s32 x, s32 y, s32 w, s32 h) {
-        r->drawString(g_msg[0], false, x + 20, y + 22, 15, r->a(White));
-        r->drawString(g_msg[1], false, x + 20, y + 42, 15, r->a(White));
+        const tsl::Color c = g_msg_problem ? Red : White;
+        r->drawString(g_msg[0], false, x + 20, y + 22, 15, r->a(c));
+        r->drawString(g_msg[1], false, x + 20, y + 42, 15, r->a(c));
     }
 
     void DrawTip(tsl::gfx::Renderer *r, s32 x, s32 y, s32 w, s32 h) {
@@ -519,7 +553,7 @@ namespace {
 
                 // The sysmodule's "Connected. IP: ..." toast at boot; off is
                 // a marker file it checks when it connects.
-                auto *notice = new tsl::elm::ToggleListItem("Notice when connected", !MarkerExists(NoNoticePath));
+                auto *notice = new tsl::elm::ToggleListItem("Connection notice", !MarkerExists(NoNoticePath));
                 notice->setStateChangedListener([](bool on) { SetMarker(NoNoticePath, !on); });
                 list->addItem(notice);
 
@@ -578,10 +612,29 @@ namespace {
             u32 m_frames = 0;
     };
 
+    // Ultrahand shows notifications (Taildrop, "Connected") only while its
+    // own menu is the loaded overlay, and a hidden Tesla overlay stays loaded.
+    // With Ultrahand installed, hiding exits instead, back to a hidden menu.
+    bool g_exit_on_hide = false;
+
     class TailscaleOverlay : public tsl::Overlay {
         public:
             void initServices() override {
                 OpenCtl();
+                tsl::hlp::doWithSDCardHandle([] {
+                    if (DIR *d = opendir("sdmc:/config/ultrahand/notifications")) {
+                        g_exit_on_hide = true;
+                        closedir(d);
+                    }
+                });
+            }
+
+            // From the combo, HOME or a touch outside us (Tesla's input thread).
+            void onHide() override {
+                if (!g_exit_on_hide) return;
+                // Without --skipCombo the menu starts hidden, as at boot.
+                envSetNextLoad("sdmc:/switch/.overlays/ovlmenu.ovl", "ovlmenu.ovl");
+                close();
             }
 
             void exitServices() override {

@@ -5,8 +5,8 @@ tailnet. It runs in the background from boot. Homebrew such as Moonlight can
 then reach your other devices by their `100.x` addresses or tailnet names,
 from anywhere.
 
-It affects **homebrew only** (apps launched from hbmenu, and home-screen
-forwarders you list in `mitm_titles`). Games and Nintendo's own apps never
+It affects **homebrew only** (apps launched from hbmenu or another homebrew
+launcher, and home-screen forwarders). Games and Nintendo's own apps never
 see the tailnet.
 
 ## What you need
@@ -194,17 +194,20 @@ All settings are optional. They take effect after a restart.
 | `accept_routes` | `on` | `off` ignores your tailnet's [subnet routes](#subnet-routes) |
 | `update_check` | `on` | `off` stops checking GitHub for a newer release at boot (as does the overlay switch) |
 | `mitm` | `homebrew` | Which programs can reach the tailnet: `homebrew`, `off`, or `homebrew,sys-ftpd` (see below) |
-| `mitm_titles` | none | Title IDs of home-screen forwarders that can reach the tailnet too, up to 16 (see below) |
-| `overlay_budget_kb` | `320` | Memory for tailnet sockets, shared by all apps (128–512). Raise it only if apps report "no buffer space". |
+| `mitm_titles` | none | Title IDs of home-screen forwarders that aren't found automatically, up to 16 (see below) |
+| `overlay_budget_kb` | `320` | Memory for tailnet sockets, shared by all apps (128–384). Raise it only if apps report "no buffer space". |
 | `ca_cert` | none | Extra CA certificate (DER) for a self-signed headscale |
 | `log_udp` | none | Send the log to `ip:port` over UDP, e.g. to `nc -ul 5514` on a computer |
 
 ### Home-screen forwarders
 
 Homebrew started from a home-screen forwarder runs as its own title, not
-through hbmenu, so it can't reach the tailnet by default. To let it, add the
-forwarder's title ID (16 hex digits) to `mitm_titles`, separating several
-with commas or spaces:
+through hbmenu. tailscale-nx still serves it when its title ID doesn't start
+with `01`, which is the case for forwarders made by the usual tools (their
+IDs mostly start with `05`); Nintendo's games and apps all start with `01`.
+
+A forwarder whose ID does start with `01` needs listing: add its title ID
+(16 hex digits) to `mitm_titles`, separating several with commas or spaces:
 
 ```ini
 mitm_titles=0500000000001234, 05ABCDEF00000000
@@ -212,8 +215,10 @@ mitm_titles=0500000000001234, 05ABCDEF00000000
 
 The title ID is the one the forwarder was made with. The tool that made it
 shows it, and title managers such as DBI or Goldleaf list installed titles
-with their IDs. List only forwarders, and restart after changing it. The log
-shows which IDs were accepted. `mitm=off` turns this off too.
+with their IDs; when a forwarder uses the tailnet, the log shows its ID
+("session from program ..."). List only forwarders, and restart after
+changing it. The log shows which IDs were accepted. `mitm=off` turns all of
+this off.
 
 ### FTP over the tailnet (sys-ftpd)
 
@@ -238,10 +243,19 @@ to `mitm=homebrew`.
 
 ## Memory
 
-tailscale-nx uses about **2.6 MB** of the memory the system sets aside for
-sysmodules: 0.9 MB of code and 1.7 MB of data, including a fixed 1 MB heap.
-The heap is typically 15–30% full. Busy tailnet sockets use
-more of it, up to the `overlay_budget_kb` limit.
+tailscale-nx uses exactly **2.5 MB** of the memory the system sets aside for
+sysmodules, taken once when it starts. It never grows or shrinks: about
+1 MB of code and 1.5 MB of data, including a fixed heap of about 820 KB. Busy tailnet
+sockets use more of that heap, up to the `overlay_budget_kb` limit.
+
+- The overlay shows how much system memory is free with everything loaded.
+  Keep some free: Nintendo starts some system modules only when they're
+  needed, and when there's no room one of them crashes (error 2001-0132,
+  often in `hid`). If you see that, turn off a sysmodule you don't need.
+- At boot tailscale-nx starts before most other sysmodules, so it can't
+  tell yet how much they will leave. Started later from the overlay, it
+  can: if less than 1 MB would be left, it doesn't start, and the overlay
+  and the log say why.
 
 ## Troubleshooting
 
