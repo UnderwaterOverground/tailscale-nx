@@ -192,4 +192,24 @@ fi
 peer tailscale set --advertise-routes=
 peer ip addr del 10.123.0.1/32 dev lo
 
+# 11. Losing the control server: the engine reports the map stream gone and
+# back (what turns the overlay's "Connected" into "Reconnecting...").
+CTL=tsnx-e2e-control
+docker rm -f "$CTL" >/dev/null 2>&1
+docker run --rm -v "$PWD/state:/s" alpine rm -f /s/host/control-e2e.state
+docker compose run --rm -T -d --name "$CTL" tsnx up --control https://headscale --authkey "$(cat state/authkey)" \
+  --hostname "$CTL" --state /state/host/control-e2e.state --port 41648 >/dev/null
+if wait_log "$CTL" "Control(true)" 30; then
+  docker compose restart headscale >/dev/null 2>&1
+  if wait_log "$CTL" "Control(false)" 30 && wait_log "$CTL" "Control(true)" 60 2; then
+    pass "control server lost and regained"
+  else
+    fail "control server lost and regained (see docker logs $CTL)"
+  fi
+else
+  fail "control server: no map stream"
+fi
+id=$(node_id "$CTL"); [[ -n "$id" ]] && hs nodes delete -i "$id" --force >/dev/null
+docker rm -f "$CTL" >/dev/null 2>&1
+
 [[ $fails -eq 0 ]] && echo "all e2e tests passed" || { echo "$fails e2e test(s) failed"; exit 1; }

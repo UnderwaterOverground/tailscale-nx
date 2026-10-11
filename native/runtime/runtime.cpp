@@ -192,6 +192,24 @@ void Runtime::Resume(SuspendReason why) {
     cv_.notify_all();
 }
 
+void Runtime::RequestSuspended(SuspendReason why, bool suspended) {
+    uint32_t cur = async_wanted_.load();
+    uint32_t next;
+    do {
+        next = (cur | (static_cast<uint32_t>(why) << 16)) & ~static_cast<uint32_t>(why);
+        if (suspended) next |= why;
+    } while (!async_wanted_.compare_exchange_weak(cur, next));
+    // No Wake(): the wake pair is the loop's, and it may be closing it.
+    cv_.notify_all();
+}
+
+// With the lock held.
+void Runtime::ApplyRequests() {
+    const uint32_t w = async_wanted_.exchange(0);
+    const uint32_t asked = w >> 16;
+    suspend_reasons_ = (suspend_reasons_ & ~asked) | (w & asked);
+}
+
 bool Runtime::WaitFor(const std::function<bool(TsnxEngine *)> &ready, const Clock::time_point *deadline) {
     std::unique_lock<std::mutex> lock(mu_);
     for (;;) {
@@ -211,6 +229,7 @@ void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick) {
     std::unique_lock<std::mutex> lock(mu_);
     while (!stop_) {
         suspend_reasons_ |= async_suspend_.exchange(0);
+        ApplyRequests();
         if (suspend_reasons_ != 0) {
             tsnx_driver_suspend(driver_);
             close(wake_rx_);
@@ -220,7 +239,13 @@ void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick) {
             suspended_ = true;
             suspended_flag_ = true;
             cv_.notify_all();
-            cv_.wait(lock, [&] { return suspend_reasons_ == 0 || stop_; });
+            // RequestSuspended notifies without the lock, so a wake-up can
+            // be missed: look again every second.
+            while (!stop_) {
+                ApplyRequests();
+                if (suspend_reasons_ == 0) break;
+                cv_.wait_for(lock, std::chrono::seconds(1));
+            }
             if (stop_) break;  // stopping: keep everything closed
             // Without a wake pair the loop still runs, just with up to a
             // second of latency for new overlay sockets.

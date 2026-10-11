@@ -18,9 +18,6 @@ namespace {
 
     // ---- tsnx:ctl client -------------------------------------------------
 
-    Service g_ctl;
-    bool g_have_ctl = false;
-
     // Atmosphère's sm makes a request for a service nobody has registered
     // wait until someone does (for boot ordering), so the overlay would hang
     // when tailscale-nx isn't running: ask whether it exists first.
@@ -28,41 +25,165 @@ namespace {
         u8 has = 0;
         const SmServiceName sn = smEncodeName(name);
         Result rc = 0;
-        tsl::hlp::doWithSmSession([&] { rc = tipcDispatchInOut(smGetServiceSessionTipc(), 65100, sn, has); });  // see OpenCtl
+        tsl::hlp::doWithSmSession([&] { rc = tipcDispatchInOut(smGetServiceSessionTipc(), 65100, sn, has); });  // see ctl::Main
         return R_SUCCEEDED(rc) && (has & 1);
     }
 
-    bool CtlGetStatus(TsnxCtlStatus *out) {
-        return g_have_ctl && R_SUCCEEDED(serviceDispatchOut(&g_ctl, 0, *out));
-    }
+    // Every tsnx:ctl request runs on this thread, so a sysmodule that doesn't
+    // answer (busy, or stuck) can't freeze the overlay: the panel keeps its
+    // last answer and says the sysmodule isn't responding. The UI thread
+    // only reads the snapshot and posts requests.
+    namespace ctl {
 
-    size_t CtlGetString(u32 cmd, char *buf, size_t cap) {
-        u32 len = 0;
-        if (!g_have_ctl ||
-            R_FAILED(serviceDispatchOut(&g_ctl, cmd, len, .buffer_attrs = {SfBufferAttr_HipcMapAlias | SfBufferAttr_Out}, .buffers = {{buf, cap}}))) {
-            buf[0] = 0;
-            return 0;
+        struct Snapshot {
+            bool valid = false;  // the thread has looked at least once
+            bool have = false;   // a session is open
+            bool status_ok = false;
+            TsnxCtlStatus status = {};
+            char login_url[256] = {};
+            char last_error[192] = {};
+        };
+
+        Thread g_thread;
+        bool g_started = false;
+        UEvent g_wake;
+        Mutex g_mutex;  // guards g_snap; never held during a request
+        Snapshot g_snap;
+        std::atomic<bool> g_quit{false};
+        std::atomic<bool> g_wanted{true};          // false: close the session, don't reopen
+        std::atomic<int> g_set_paused{-1};         // a SetPaused to send (0 or 1)
+        std::atomic<bool> g_pause_pending{false};  // until a status after it is in
+        std::atomic<bool> g_stop{false};           // a Stop to send
+        std::atomic<bool> g_stop_done{false};
+        Result g_stop_rc = 0;
+        u32 g_stop_code = 0;
+        std::atomic<u64> g_call_since{0};  // system tick the current request began, 0: none
+
+        Service g_session;  // the thread's own
+        bool g_open = false;
+
+        template <class F>
+        auto Call(F &&f) {
+            g_call_since = armGetSystemTick();
+            auto r = f();
+            g_call_since = 0;
+            return r;
         }
-        buf[cap - 1] = 0;
-        return len;
+
+        size_t GetString(u32 cmd, char *buf, size_t cap) {
+            u32 len = 0;
+            const Result rc = Call([&] {
+                return serviceDispatchOut(&g_session, cmd, len, .buffer_attrs = {SfBufferAttr_HipcMapAlias | SfBufferAttr_Out}, .buffers = {{buf, cap}});
+            });
+            if (R_FAILED(rc)) {
+                buf[0] = 0;
+                return 0;
+            }
+            buf[cap - 1] = 0;
+            return len;
+        }
+
+        void Close() {
+            if (g_open) serviceClose(&g_session);
+            g_open = false;
+        }
+
+        void Refresh() {
+            static Snapshot s;  // keeps the thread's stack small
+            s = Snapshot{};
+            if (g_open) {
+                s.status_ok = R_SUCCEEDED(Call([] { return serviceDispatchOut(&g_session, 0, s.status); }));
+                if (!s.status_ok) Close();  // the process went away
+            }
+            if (s.status_ok && s.status.state == TSNX_CTL_NEEDS_LOGIN) GetString(1, s.login_url, sizeof s.login_url);
+            if (s.status_ok) GetString(3, s.last_error, sizeof s.last_error);
+            s.have = g_open;
+            s.valid = true;
+            mutexLock(&g_mutex);
+            g_snap = s;
+            mutexUnlock(&g_mutex);
+        }
+
+        void Main(void *) {
+            while (!g_quit) {
+                if (!g_wanted) {
+                    Close();
+                } else if (!g_open) {
+                    // Only once the service exists (see ServiceExists). Tesla
+                    // keeps no sm session open after start-up, so open one
+                    // around each use (libnx counts them, across threads too).
+                    g_open = Call([] {
+                        bool ok = false;
+                        tsl::hlp::doWithSmSession([&] { ok = ServiceExists(TSNX_CTL_SERVICE) && R_SUCCEEDED(smGetService(&g_session, TSNX_CTL_SERVICE)); });
+                        return ok;
+                    });
+                }
+                if (g_open && g_stop) {
+                    struct {
+                        u32 code, detail;
+                    } out = {};
+                    g_stop_rc = Call([&] { return serviceDispatchOut(&g_session, 4, out); });
+                    g_stop_code = out.code;
+                    g_stop = false;
+                    g_stop_done = true;
+                }
+                const int paused = g_set_paused.exchange(-1);
+                if (g_open && paused >= 0) {
+                    const u8 v = static_cast<u8>(paused);
+                    Call([&] { return serviceDispatchIn(&g_session, 2, v); });
+                }
+                Refresh();
+                if (paused >= 0) g_pause_pending = false;
+                // About twice a second, or at once when asked.
+                waitSingle(waiterForUEvent(&g_wake), 500'000'000ull);
+            }
+            Close();
+        }
+
+        void Wake() { ueventSignal(&g_wake); }
+
+        void Start() {
+            ueventCreate(&g_wake, true);
+            mutexInit(&g_mutex);
+            g_started = R_SUCCEEDED(threadCreate(&g_thread, Main, nullptr, nullptr, 0x4000, 0x2C, -2)) && R_SUCCEEDED(threadStart(&g_thread));
+            // A moment for the first answer, so the panel opens with it.
+            for (int i = 0; i < 30 && g_started; i++) {
+                mutexLock(&g_mutex);
+                const bool valid = g_snap.valid;
+                mutexUnlock(&g_mutex);
+                if (valid) break;
+                svcSleepThread(10'000'000);
+            }
+        }
+
+        void Finish() {
+            if (!g_started) return;
+            g_quit = true;
+            Wake();
+            // A request the sysmodule never answers would block forever:
+            // then leave the thread to the process's exit.
+            if (R_SUCCEEDED(waitSingleHandle(g_thread.handle, 1'000'000'000ull))) threadClose(&g_thread);
+        }
+
+        Snapshot Get() {
+            mutexLock(&g_mutex);
+            const Snapshot s = g_snap;
+            mutexUnlock(&g_mutex);
+            return s;
+        }
+
+        // How long the current request has waited for an answer.
+        u64 BusySeconds() {
+            const u64 since = g_call_since;
+            return since ? armTicksToNs(armGetSystemTick() - since) / 1'000'000'000ull : 0;
+        }
+
     }
 
+    bool g_have_ctl = false;
+    bool g_valid = false;  // ctl::Snapshot::valid
     TsnxCtlStatus g_status = {};
     bool g_status_ok = false;
-
-    void CloseCtl() {
-        if (g_have_ctl) serviceClose(&g_ctl);
-        g_have_ctl = false;
-        g_status_ok = false;
-    }
-
-    // Only once the service exists (see ServiceExists). Tesla keeps no sm
-    // session open after start-up, so open one around each use.
-    void OpenCtl() {
-        if (g_have_ctl) return;
-        tsl::hlp::doWithSmSession(
-            [] { g_have_ctl = ServiceExists(TSNX_CTL_SERVICE) && R_SUCCEEDED(smGetService(&g_ctl, TSNX_CTL_SERVICE)); });
-    }
 
     // ---- stop and start ------------------------------------------------------
 
@@ -82,7 +203,7 @@ namespace {
 
     enum class Phase {
         Idle,
-        Stopping,  // the Stop request is under way (on g_stop_thread)
+        Stopping,  // the Stop request is under way (on the ctl thread)
         Exiting,   // accepted; waiting for the process and its service to go
         Starting,  // running, but its service isn't there yet
     };
@@ -112,54 +233,32 @@ namespace {
         g_msg_problem = false;
     }
 
-    // Stop can take a few seconds (it waits for the engine and the system),
-    // so it runs on its own thread while the overlay keeps drawing. Nothing
-    // else uses the session meanwhile.
-    Thread g_stop_thread;
-    std::atomic<bool> g_stop_done{false};
-    Result g_stop_rc = 0;
-    u32 g_stop_code = 0;
-
-    void StopThreadMain(void *) {
-        struct {
-            u32 code, detail;
-        } out = {};
-        g_stop_rc = serviceDispatchOut(&g_ctl, 4, out);
-        g_stop_code = out.code;
-        g_stop_done = true;
-    }
-
+    // Stop can take a few seconds (it waits for the engine and the system);
+    // the ctl thread sends it while the overlay keeps drawing.
     void BeginStop() {
         if (!g_have_ctl || g_phase != Phase::Idle) return;
         if (g_status.version < 2) {
             Say("This tailscale-nx is too old to stop here.", "Update it, or restart the console.");
             return;
         }
-        g_stop_done = false;
-        if (R_FAILED(threadCreate(&g_stop_thread, StopThreadMain, nullptr, nullptr, 0x2000, 0x2C, -2))) {
-            Say("Couldn't stop it (out of memory).");
-            return;
-        }
-        if (R_FAILED(threadStart(&g_stop_thread))) {
-            threadClose(&g_stop_thread);
-            Say("Couldn't stop it (out of memory).");
-            return;
-        }
+        ctl::g_stop_done = false;
+        ctl::g_stop = true;
+        ctl::Wake();
         Note("");
         SetPhase(Phase::Stopping);
     }
 
     void FinishStop() {
-        threadWaitForExit(&g_stop_thread);
-        threadClose(&g_stop_thread);
         SetPhase(Phase::Idle);
         // A failed request most likely means it exited before replying.
-        if (R_FAILED(g_stop_rc) || g_stop_code == TSNX_CTL_STOP_OK) {
-            CloseCtl();
+        if (R_FAILED(ctl::g_stop_rc) || ctl::g_stop_code == TSNX_CTL_STOP_OK) {
+            ctl::g_wanted = false;
+            ctl::Wake();
+            g_have_ctl = g_status_ok = false;
             SetPhase(Phase::Exiting);
             return;
         }
-        switch (g_stop_code) {
+        switch (ctl::g_stop_code) {
             case TSNX_CTL_STOP_HOMEBREW:
                 Say("Close homebrew apps first: they have", "connections through tailscale-nx.");
                 break;
@@ -202,7 +301,7 @@ namespace {
             }
         });
         Result rc = 0;
-        tsl::hlp::doWithSmSession([&rc] { rc = pmshellInitialize(); });  // see OpenCtl
+        tsl::hlp::doWithSmSession([&rc] { rc = pmshellInitialize(); });  // see ctl::Main
         if (R_SUCCEEDED(rc)) {
             const NcmProgramLocation loc = {.program_id = SysmoduleProgramId, .storageID = NcmStorageId_None};
             u64 pid = 0;
@@ -274,11 +373,12 @@ namespace {
     void Poll() {
         switch (g_phase) {
             case Phase::Stopping:
-                if (g_stop_done) FinishStop();
+                if (ctl::g_stop_done) FinishStop();
                 break;
             case Phase::Exiting:
                 // Gone from pm and from sm: a new instance can register again.
                 if (!SysmoduleRunning() && !ServiceExists(TSNX_CTL_SERVICE)) {
+                    ctl::g_wanted = true;
                     SetPhase(Phase::Idle);
                     ReadWhyNotRunning();
                     Note("Stopped. It starts again at boot,", "or with Start tailscale-nx above.");
@@ -292,12 +392,9 @@ namespace {
                     ReadWhyNotRunning();
                     if (g_we_started) Say("It stopped right away. See", "config/tailscale-nx/sysmodule.log.");
                     g_we_started = false;
-                } else {
-                    OpenCtl();
-                    if (g_have_ctl) {
-                        SetPhase(Phase::Idle);
-                        g_we_started = false;
-                    }
+                } else if (g_have_ctl) {  // the ctl thread opens the session
+                    SetPhase(Phase::Idle);
+                    g_we_started = false;
                 }
                 break;
             case Phase::Idle:
@@ -319,20 +416,20 @@ namespace {
 
     void CtlSetPaused(bool paused) {
         if (!g_have_ctl || g_phase != Phase::Idle) return;
-        const u8 v = paused;
-        serviceDispatchIn(&g_ctl, 2, v);
+        ctl::g_pause_pending = true;
+        ctl::g_set_paused = paused;
+        ctl::Wake();
     }
 
+    // Takes the ctl thread's latest answers.
     void Refresh() {
-        if (g_phase == Phase::Stopping) return;  // the session is busy with Stop
-        g_status_ok = CtlGetStatus(&g_status);
-        if (g_have_ctl && !g_status_ok) CloseCtl();  // the process went away
-        if (g_status_ok && g_status.state == TSNX_CTL_NEEDS_LOGIN) {
-            CtlGetString(1, g_login_url, sizeof g_login_url);
-        } else {
-            g_login_url[0] = 0;
-        }
-        if (g_status_ok) CtlGetString(3, g_last_error, sizeof g_last_error);
+        const ctl::Snapshot s = ctl::Get();
+        g_valid = s.valid;
+        g_have_ctl = s.have && g_phase != Phase::Exiting;
+        g_status_ok = s.status_ok && g_have_ctl;
+        g_status = s.status;
+        std::snprintf(g_login_url, sizeof g_login_url, "%s", s.login_url);
+        std::snprintf(g_last_error, sizeof g_last_error, "%s", s.last_error);
         if (std::strcmp(g_login_url, g_qr_for) != 0) {
             std::snprintf(g_qr_for, sizeof g_qr_for, "%s", g_login_url);
             g_qr_ok = g_login_url[0] && qrcodegen_encodeText(g_login_url, g_qr_tmp, g_qr, qrcodegen_Ecc_LOW, qrcodegen_VERSION_MIN,
@@ -361,11 +458,44 @@ namespace {
     constexpr tsl::Color Blue{0x5, 0xA, 0xF, 0xF};
     constexpr tsl::Color Red{0xF, 0x5, 0x5, 0xF};
 
+    // Draws text over two lines at most (broken at a space, about `cols`
+    // characters each; the rest is cut with "...").
+    void DrawTwoLines(tsl::gfx::Renderer *r, const char *text, s32 x, s32 y, u32 size, tsl::Color c, size_t cols) {
+        char first[96], second[96] = "";
+        size_t cut = std::strlen(text);
+        if (cut > cols) {
+            cut = cols;
+            while (cut > 0 && text[cut] != ' ') cut--;
+            if (cut == 0) cut = cols;
+        }
+        std::snprintf(first, sizeof first, "%.*s", static_cast<int>(cut), text);
+        const char *rest = text + cut + (text[cut] == ' ');
+        if (*rest) {
+            if (std::strlen(rest) > cols) std::snprintf(second, sizeof second, "%.*s...", static_cast<int>(cols - 3), rest);
+            else std::snprintf(second, sizeof second, "%s", rest);
+        }
+        r->drawString(first, false, x, y, size, r->a(c));
+        if (second[0]) r->drawString(second, false, x, y + size + 3, size, r->a(c));
+    }
+
     void DrawStatus(tsl::gfx::Renderer *r, s32 x, s32 y, s32 w, s32 h) {
         const char *state = "Not running";
         tsl::Color color = Red;
         if (g_phase == Phase::Stopping || g_phase == Phase::Exiting) {
             r->drawString("Stopping...", false, x + 20, y + 40, 30, r->a(Grey));
+            return;
+        }
+        // The sysmodule hasn't answered a request: it's busy or stuck.
+        if (const u64 busy = ctl::BusySeconds(); busy >= 2) {
+            char since[64];
+            std::snprintf(since, sizeof since, "tailscale-nx hasn't answered for %llu s.", static_cast<unsigned long long>(busy));
+            r->drawString("Not responding", false, x + 20, y + 40, 30, r->a(Red));
+            r->drawString(since, false, x + 20, y + 75, 17, r->a(Grey));
+            r->drawString("If it stays like this, restart the console.", false, x + 20, y + 100, 17, r->a(Grey));
+            return;
+        }
+        if (!g_valid) {
+            r->drawString("Checking...", false, x + 20, y + 40, 30, r->a(Grey));
             return;
         }
         if (g_phase == Phase::Starting) {
@@ -378,7 +508,7 @@ namespace {
             switch (g_status.state) {
                 case TSNX_CTL_STARTING:    state = "Starting...";          color = Blue;   break;
                 case TSNX_CTL_NEEDS_LOGIN: state = "Log in needed";        color = Yellow; break;
-                case TSNX_CTL_CONNECTING:  state = "Connecting...";        color = Blue;   break;
+                case TSNX_CTL_CONNECTING:  state = g_status.ipv4[0] ? "Reconnecting..." : "Connecting..."; color = Blue; break;
                 case TSNX_CTL_CONNECTED:   state = "Connected";            color = Green;  break;
                 case TSNX_CTL_PAUSED:      state = "Paused";               color = Grey;   break;
                 case TSNX_CTL_STOPPING:    state = "Stopping...";          color = Grey;   break;
@@ -392,18 +522,7 @@ namespace {
                 const char *why = std::strstr(g_crashed, ": ");
                 why = why ? why + 2 : g_crashed;
                 r->drawString("It turned itself off after failures:", false, x + 20, y + 75, 17, r->a(Grey));
-                // Two lines at most, broken at a space.
-                char first[64], second[96] = "";
-                size_t cut = std::strlen(why);
-                if (cut > 40) {
-                    cut = 40;
-                    while (cut > 0 && why[cut] != ' ') cut--;
-                    if (cut == 0) cut = 40;
-                }
-                std::snprintf(first, sizeof first, "%.*s", static_cast<int>(cut), why);
-                if (why[cut]) std::snprintf(second, sizeof second, "%s", why + cut + (why[cut] == ' '));
-                r->drawString(first, false, x + 20, y + 98, 15, r->a(Grey));
-                if (second[0]) r->drawString(second, false, x + 20, y + 116, 15, r->a(Grey));
+                DrawTwoLines(r, why, x + 20, y + 98, 15, Grey, 40);
             } else if (g_not_started[0]) {
                 // "Too little system memory: other sysmodules leave N KB free ..."
                 r->drawString("It didn't start: too little system memory.", false, x + 20, y + 75, 17, r->a(Grey));
@@ -420,8 +539,21 @@ namespace {
             }
             return;
         }
+        if (g_status.engine_stalled_s) {
+            // It answers, but its engine hasn't run: it can't connect.
+            std::snprintf(line, sizeof line, "Stuck: its engine hasn't run for %u s.", g_status.engine_stalled_s);
+            r->drawString(line, false, x + 20, y + 75, 17, r->a(Red));
+            r->drawString("If it stays like this, restart the console.", false, x + 20, y + 102, 17, r->a(Grey));
+            return;
+        }
+        if (g_status.state != TSNX_CTL_CONNECTED && (g_status.flags & TSNX_CTL_FLAG_OFFLINE)) {
+            r->drawString("No internet connection.", false, x + 20, y + 75, 17, r->a(Grey));
+            r->drawString("It connects once the Switch is online.", false, x + 20, y + 102, 17, r->a(Grey));
+            return;
+        }
+        // Our address only while it's usable (it stays known while paused).
         const u8 *ip = g_status.ipv4;
-        if (ip[0]) {
+        if (ip[0] && g_status.state == TSNX_CTL_CONNECTED) {
             std::snprintf(line, sizeof line, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
             r->drawString(line, false, x + 20, y + 75, 20, r->a(White));
         }
@@ -433,6 +565,11 @@ namespace {
         }
         std::snprintf(line, sizeof line, "%u peers%s%s", g_status.peers, relay, (g_status.flags & TSNX_CTL_FLAG_DIRECT) ? ", direct" : "");
         r->drawString(line, false, x + 20, y + 102, 17, r->a(Grey));
+        if (g_last_error[0] && g_status.state != TSNX_CTL_CONNECTED && g_status.state != TSNX_CTL_PAUSED) {
+            char error[sizeof g_last_error + 16];
+            std::snprintf(error, sizeof error, "Last error: %s", g_last_error);
+            DrawTwoLines(r, error, x + 20, y + 130, 15, Grey, 46);
+        }
     }
 
     // The login QR code, or what's active once connected.
@@ -470,11 +607,6 @@ namespace {
             std::snprintf(mem, sizeof mem, "Memory: %u.%u MB. System free: %u.%u MB.", g_status.memory_kb / 1024,
                           g_status.memory_kb % 1024 * 10 / 1024, g_status.system_free_kb / 1024, g_status.system_free_kb % 1024 * 10 / 1024);
             line(mem, Grey);
-        }
-        if (g_last_error[0] && g_status.state != TSNX_CTL_CONNECTED) {
-            ty += 8;
-            line("Last error:", Grey);
-            r->drawString(g_last_error, false, x + 20, ty, 15, r->a(Grey), w - 40);
         }
     }
 
@@ -526,7 +658,7 @@ namespace {
                 Refresh();
                 auto *frame = new tsl::elm::OverlayFrame("Tailscale", "tailscale-nx " APP_VERSION);
                 auto *list = new tsl::elm::List();
-                list->addItem(new tsl::elm::CustomDrawer(DrawStatus), 120);
+                list->addItem(new tsl::elm::CustomDrawer(DrawStatus), 165);
                 if (!g_status_ok) ReadWhyNotRunning();
 
                 m_toggle = new tsl::elm::ToggleListItem("Tailscale", !(g_status_ok && g_status.state == TSNX_CTL_PAUSED));
@@ -575,7 +707,7 @@ namespace {
                 Poll();
                 Refresh();
                 const bool on = !(g_status_ok && g_status.state == TSNX_CTL_PAUSED);
-                if (m_toggle && m_toggle->getState() != on) m_toggle->setState(on);
+                if (m_toggle && !ctl::g_pause_pending && m_toggle->getState() != on) m_toggle->setState(on);
                 if (m_power) {
                     const char *label = PowerLabel();
                     if (label != m_power_label) {
@@ -620,7 +752,7 @@ namespace {
     class TailscaleOverlay : public tsl::Overlay {
         public:
             void initServices() override {
-                OpenCtl();
+                ctl::Start();
                 tsl::hlp::doWithSDCardHandle([] {
                     if (DIR *d = opendir("sdmc:/config/ultrahand/notifications")) {
                         g_exit_on_hide = true;
@@ -638,12 +770,7 @@ namespace {
             }
 
             void exitServices() override {
-                // A Stop in flight still uses the session; it ends within seconds.
-                if (g_phase == Phase::Stopping) {
-                    threadWaitForExit(&g_stop_thread);
-                    threadClose(&g_stop_thread);
-                }
-                CloseCtl();
+                ctl::Finish();
             }
 
             std::unique_ptr<tsl::Gui> loadInitialGui() override {

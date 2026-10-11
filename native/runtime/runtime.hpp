@@ -72,6 +72,10 @@ public:
     // IsSuspended() turns true once every socket is closed. For callers that
     // must not stall on the socket service, e.g. a sleep notification.
     void RequestSuspend(SuspendReason why) { async_suspend_.fetch_or(why); }
+    // Suspends or resumes for `why` without waiting on the engine: the loop
+    // applies the latest request within its poll interval (<= 1 s), also
+    // while suspended. For a control service that must always answer.
+    void RequestSuspended(SuspendReason why, bool suspended);
     bool IsSuspended() const { return suspended_flag_.load(); }
     // Run on the engine thread right after suspending / before resuming,
     // e.g. to close and reopen sockets the embedder owns.
@@ -131,6 +135,10 @@ private:
     bool stop_ = false;
     uint32_t suspend_reasons_ = 0;
     std::atomic<uint32_t> async_suspend_{0};
+    // RequestSuspended: the reasons asked about (high 16 bits) and whether
+    // each is wanted (low 16 bits); the latest request per reason wins.
+    std::atomic<uint32_t> async_wanted_{0};
+    void ApplyRequests();
     std::atomic<bool> suspended_flag_{false};
     std::function<void()> on_suspend_, on_resume_;
     bool suspended_ = false;

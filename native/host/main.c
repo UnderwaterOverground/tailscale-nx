@@ -28,7 +28,7 @@ static int g_peers;
 static void on_event(void *ctx, const TsnxEvent *ev) {
     (void)ctx;
     static const char *names[] = {"log", "login-url", "authorized", "addresses", "peers",
-                                  "home-derp", "error", "endpoints", "peer-path"};
+                                  "home-derp", "error", "endpoints", "peer-path", "node-key", "control"};
     const char *name = ev->kind < sizeof names / sizeof *names ? names[ev->kind] : "?";
     if (ev->kind == TSNX_EVENT_PEERS) g_peers = (int)ev->value;
     printf("[event] %s value=%u %s\n", name, ev->value, ev->text);

@@ -19,7 +19,8 @@
 enum {
     TSNX_CTL_STARTING = 0,     // waiting for the network / starting up
     TSNX_CTL_NEEDS_LOGIN = 1,  // a login link is waiting (GetLoginUrl)
-    TSNX_CTL_CONNECTING = 2,   // authorized, joining the tailnet
+    TSNX_CTL_CONNECTING = 2,   // authorized, joining the tailnet; with an address:
+                               // lost the control server for a while, reconnecting
     TSNX_CTL_CONNECTED = 3,
     TSNX_CTL_PAUSED = 4,       // switched off by the user (survives reboots)
     TSNX_CTL_STOPPING = 5,     // stopped from the overlay; exiting (or idle until restart)
@@ -36,6 +37,7 @@ enum {
     TSNX_CTL_FLAG_MITM = 1,      // homebrew sockets reach the tailnet
     TSNX_CTL_FLAG_MAGICDNS = 2,  // tailnet names in Atmosphere's hosts file
     TSNX_CTL_FLAG_DIRECT = 4,    // at least one peer reached directly (not relayed)
+    TSNX_CTL_FLAG_OFFLINE = 8,   // the console has no internet connection
 };
 
 typedef struct {
@@ -47,7 +49,11 @@ typedef struct {
     uint32_t flags;      // TSNX_CTL_FLAG_*
     uint32_t memory_kb;       // what tailscale-nx takes (fixed), 0 if unknown
     uint32_t system_free_kb;  // free system memory, which sysmodules share
-    uint32_t reserved[8];
+    // Seconds since the engine loop last ran a round (it runs at least once
+    // a second), 0 below 3 s or while paused: anything more means it's stuck.
+    // Always 0 from sysmodules before 1.1.
+    uint32_t engine_stalled_s;
+    uint32_t reserved[7];
 } TsnxCtlStatus;
 
 #ifdef __cplusplus

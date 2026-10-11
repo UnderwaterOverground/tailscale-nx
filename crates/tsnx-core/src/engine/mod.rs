@@ -57,6 +57,8 @@ pub enum Event {
     PeerPath { peer: String, direct: Option<SocketAddr> },
     Error(String),
     Log(String),
+    /// The control server's map stream came up (`true`) or went away.
+    Control(bool),
     /// Our node key was replaced (the old one expired); persist
     /// [`Engine::node_private_key`] in place of the stored one.
     NodeKeyChanged,
@@ -146,6 +148,8 @@ pub struct Engine {
     tls: Arc<rustls::ClientConfig>,
     io: VecDeque<Io>,
     events: VecDeque<Event>,
+    /// Whether the last [`Event::Control`] said up.
+    control_up: bool,
     now: Instant,
     last_trim: Instant,
     /// Wall clock reference: at monotonic `.0`, Unix time was `.1`.
@@ -210,6 +214,7 @@ impl Engine {
             tls,
             io: VecDeque::new(),
             events: VecDeque::new(),
+            control_up: false,
             now,
             last_trim: now,
             wall: (now, unix_time),
@@ -566,6 +571,10 @@ impl Engine {
                     }
                 }
             }
+        }
+        if self.control.is_polling() != self.control_up {
+            self.control_up = !self.control_up;
+            self.events.push_back(Event::Control(self.control_up));
         }
 
         // Overlay stack -> tunnel.
@@ -1097,5 +1106,26 @@ mod tests {
         assert_eq!(derp_connects(&mut e), 0);
         assert_eq!(e.derps.len(), 1);
         assert_eq!(e.derp_backoff.clone().next_delay(), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn control_events_follow_the_map_stream() {
+        let now = Instant::from_nanos(1_000_000_000);
+        let mut e = engine(now);
+        let controls = |e: &mut Engine| -> Vec<bool> {
+            core::iter::from_fn(|| e.poll_event()).filter_map(|ev| if let Event::Control(up) = ev { Some(up) } else { None }).collect()
+        };
+        e.flush(now);
+        assert!(controls(&mut e).is_empty());
+
+        e.control.force_polling(7);
+        e.flush(now);
+        assert_eq!(controls(&mut e), [true]);
+        e.flush(now);
+        assert!(controls(&mut e).is_empty());
+
+        e.control.on_closed(7, now);
+        e.flush(now);
+        assert_eq!(controls(&mut e), [false]);
     }
 }

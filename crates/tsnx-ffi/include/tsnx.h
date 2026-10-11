@@ -106,6 +106,8 @@ typedef struct {
 // Our node key expired and was replaced: save tsnx_engine_node_key() as the
 // state file's node= key (no text; the key is never put in an event).
 #define TSNX_EVENT_NODE_KEY 9u
+// The control server's map stream: value 1 = up, 0 = lost (it retries).
+#define TSNX_EVENT_CONTROL 10u
 
 typedef struct {
     uint32_t kind;

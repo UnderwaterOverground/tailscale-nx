@@ -140,5 +140,11 @@ routes-test: target/libtsnx_interpose.dylib
 	$(CXX) -std=c++17 -O1 -g -Wall $(VSOCK_INC) -o target/routes-test native/host/routes_test.cpp $<
 	target/routes-test
 
+# The runtime's non-blocking pause (macOS; links the interpose shim).
+.PHONY: runtime-test
+runtime-test: target/libtsnx_interpose.dylib
+	$(CXX) -std=c++17 -O1 -g -Wall $(VSOCK_INC) -o target/runtime-test native/host/runtime_test.cpp $<
+	target/runtime-test
+
 target/vsock-test: native/interpose/vsock_test.c
 	$(CC) -O1 -g -Wall -o $@ $<

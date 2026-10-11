@@ -57,6 +57,7 @@ pub const TSNX_EVENT_ERROR: u32 = 6;
 pub const TSNX_EVENT_ENDPOINTS: u32 = 7;
 pub const TSNX_EVENT_PEER_PATH: u32 = 8;
 pub const TSNX_EVENT_NODE_KEY: u32 = 9;
+pub const TSNX_EVENT_CONTROL: u32 = 10;
 
 #[repr(C)]
 pub struct TsnxEvent {
@@ -241,6 +242,7 @@ pub unsafe extern "C" fn tsnx_engine_poll_event(e: *mut TsnxEngine, out: *mut Ts
         },
         Event::Log(s) => (TSNX_EVENT_LOG, 0, s),
         Event::NodeKeyChanged => (TSNX_EVENT_NODE_KEY, 0, String::new()),
+        Event::Control(up) => (TSNX_EVENT_CONTROL, up as u32, String::new()),
     };
     e.event_text = text.into_bytes();
     e.event_text.push(0);

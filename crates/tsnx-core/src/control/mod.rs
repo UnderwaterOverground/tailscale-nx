@@ -20,9 +20,20 @@ pub fn key_request(host: &str) -> Vec<u8> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyError {
+    /// The connection ended before the whole reply arrived.
     Incomplete,
     Status(String),
     Missing,
+}
+
+impl core::fmt::Display for KeyError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            KeyError::Incomplete => f.write_str("the reply was cut off"),
+            KeyError::Status(s) => write!(f, "the server answered \"{s}\""),
+            KeyError::Missing => f.write_str("no key in the reply"),
+        }
+    }
 }
 
 /// Extracts the `mkey:` Noise public key from a complete /key HTTP response.
@@ -32,6 +43,11 @@ pub fn parse_key_response(resp: &[u8]) -> Result<[u8; 32], KeyError> {
     let status = head.lines().next().unwrap_or("");
     if status.split(' ').nth(1) != Some("200") {
         return Err(KeyError::Status(status.into()));
+    }
+    // A JSON object: anything short of its end means the connection closed
+    // early (a dropped connection, not a server without a key).
+    if !body.trim_end().ends_with('}') {
+        return Err(KeyError::Incomplete);
     }
     let start = body.find("\"publicKey\"").ok_or(KeyError::Missing)?;
     let rest = &body[start..];
@@ -72,5 +88,9 @@ mod tests {
         let key = parse_key_response(resp).unwrap();
         assert_eq!(hex32(&key), "19d16b8d999dfb1fbbab1480b50a3a77da4e549536827f349774233d8f42ce22");
         assert!(matches!(parse_key_response(b"HTTP/1.1 404 Not Found\r\n\r\n"), Err(KeyError::Status(_))));
+        // Cut off after the headers, or partway through the body.
+        assert_eq!(parse_key_response(b"HTTP/1.1 200 OK\r\n\r\n"), Err(KeyError::Incomplete));
+        assert_eq!(parse_key_response(&resp[..resp.len() - 20]), Err(KeyError::Incomplete));
+        assert_eq!(parse_key_response(b"HTTP/1.1 200 OK\r\n\r\n{\"other\":1}"), Err(KeyError::Missing));
     }
 }
