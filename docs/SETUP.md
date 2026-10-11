@@ -104,8 +104,8 @@ Until either happens, the Switch can't reach the tailnet.
     one.
 - **Connected notice:** after each boot, a 5-second toast shows
   "Connected. IP: 100.x.y.z" the first time the Switch connects. It doesn't
-  appear again on wake or reconnect. Turn it off with **Notice when
-  connected** in the overlay.
+  appear again on wake or reconnect. Turn it off with **Connection notice**
+  in the overlay.
 - **Taildrop:** send files to the Switch from your other devices (see
   [below](#taildrop)).
 - **Update notice:** 30 seconds after each boot, tailscale-nx asks GitHub
@@ -267,6 +267,14 @@ sockets use more of that heap, up to the `overlay_budget_kb` limit.
     sleeps the console never woke from. The file says which. **Turn back on**
     in the overlay deletes it and starts tailscale-nx again.
   - If `config/tailscale-nx/disabled` exists, delete it.
+- **The overlay says "Reconnecting..." or "No internet connection."**
+  - The Switch lost its internet connection, or can't reach Tailscale's
+    server. tailscale-nx keeps trying and reconnects on its own. On hotel or
+    café Wi-Fi, sign in to the network first. If it stays like this, the
+    overlay shows the last error.
+- **The overlay says "Not responding" or "Stuck".**
+  - tailscale-nx has stopped answering. Restart the console, and send us
+    `sysmodule.log.1` (the boot before the restart).
 - **What happened?**
   - The log is in `config/tailscale-nx/sysmodule.log`, and the previous
     boot's log is in `sysmodule.log.1`.
