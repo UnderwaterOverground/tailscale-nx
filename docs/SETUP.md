@@ -5,8 +5,8 @@ tailnet. It runs in the background from boot. Homebrew such as Moonlight can
 then reach your other devices by their `100.x` addresses or tailnet names,
 from anywhere.
 
-It affects **homebrew only** (apps launched from hbmenu, and home-screen
-forwarders you list in `mitm_titles`). Games and Nintendo's own apps never
+It affects **homebrew only** (apps launched from hbmenu or another homebrew
+launcher, and home-screen forwarders). Games and Nintendo's own apps never
 see the tailnet.
 
 ## What you need
@@ -187,7 +187,7 @@ All settings are optional. They take effect after a restart.
 | `taildrop` | `on` | `off` stops receiving files with [Taildrop](#taildrop) |
 | `accept_routes` | `on` | `off` ignores your tailnet's [subnet routes](#subnet-routes) |
 | `mitm` | `homebrew` | Which programs can reach the tailnet: `homebrew`, `off`, or `homebrew,sys-ftpd` (see below) |
-| `mitm_titles` | none | Title IDs of home-screen forwarders that can reach the tailnet too, up to 16 (see below) |
+| `mitm_titles` | none | Title IDs of home-screen forwarders that aren't found automatically, up to 16 (see below) |
 | `overlay_budget_kb` | `320` | Memory for tailnet sockets, shared by all apps (128–384). Raise it only if apps report "no buffer space". |
 | `ca_cert` | none | Extra CA certificate (DER) for a self-signed headscale |
 | `log_udp` | none | Send the log to `ip:port` over UDP, e.g. to `nc -ul 5514` on a computer |
@@ -195,9 +195,12 @@ All settings are optional. They take effect after a restart.
 ### Home-screen forwarders
 
 Homebrew started from a home-screen forwarder runs as its own title, not
-through hbmenu, so it can't reach the tailnet by default. To let it, add the
-forwarder's title ID (16 hex digits) to `mitm_titles`, separating several
-with commas or spaces:
+through hbmenu. tailscale-nx still serves it when its title ID doesn't start
+with `01`, which is the case for forwarders made by the usual tools (their
+IDs mostly start with `05`); Nintendo's games and apps all start with `01`.
+
+A forwarder whose ID does start with `01` needs listing: add its title ID
+(16 hex digits) to `mitm_titles`, separating several with commas or spaces:
 
 ```ini
 mitm_titles=0500000000001234, 05ABCDEF00000000
@@ -205,8 +208,10 @@ mitm_titles=0500000000001234, 05ABCDEF00000000
 
 The title ID is the one the forwarder was made with. The tool that made it
 shows it, and title managers such as DBI or Goldleaf list installed titles
-with their IDs. List only forwarders, and restart after changing it. The log
-shows which IDs were accepted. `mitm=off` turns this off too.
+with their IDs; when a forwarder uses the tailnet, the log shows its ID
+("session from program ..."). List only forwarders, and restart after
+changing it. The log shows which IDs were accepted. `mitm=off` turns all of
+this off.
 
 ### FTP over the tailnet (sys-ftpd)
 

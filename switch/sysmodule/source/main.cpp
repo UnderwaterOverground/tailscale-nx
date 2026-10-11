@@ -999,8 +999,8 @@ namespace ams {
         });
         if (!StartPowerHandling(*rt)) return;
         g_runtime = rt.get();
-        // mitm=homebrew (default), off, or homebrew,sys-ftpd; mitm_titles
-        // adds forwarders to the homebrew scope.
+        // mitm=homebrew (default), off, or homebrew,sys-ftpd. Homebrew
+        // includes forwarders (non-01 IDs); mitm_titles adds others.
         const bool mitm = bsd_mitm::Start(*rt, std::strcmp(cfg.mitm, "off") == 0 ? bsd_mitm::Scope::Off : bsd_mitm::Scope::Homebrew,
                                           std::strstr(cfg.mitm, "sys-ftpd") != nullptr, cfg.mitm_titles);
 

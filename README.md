@@ -71,8 +71,9 @@ and use that instead, which is fine. Away from home, it uses the tailnet.
 
 ## Known limitations
 
-- **Homebrew only**: apps launched from hbmenu, and home-screen forwarders
-  only if their title IDs are listed in `mitm_titles` (see the
+- **Homebrew only**: apps launched from hbmenu or another homebrew launcher,
+  and home-screen forwarders (those with title IDs starting `01` need
+  listing in `mitm_titles`, see the
   [setup guide](docs/SETUP.md#home-screen-forwarders)). Games and Nintendo's
   apps don't use the tailnet.
 - **No exit nodes:** only tailnet addresses and your tailnet's subnet routes
