@@ -238,14 +238,17 @@ to `mitm=homebrew`.
 
 tailscale-nx uses exactly **2.5 MB** of the memory the system sets aside for
 sysmodules, taken once when it starts. It never grows or shrinks: about
-1 MB of code and 1.5 MB of data, including a fixed 832 KB heap. Busy tailnet
+1 MB of code and 1.5 MB of data, including a fixed heap of about 820 KB. Busy tailnet
 sockets use more of that heap, up to the `overlay_budget_kb` limit.
 
-- The overlay shows how much system memory is free.
-- If other sysmodules leave less than 1 MB free once tailscale-nx is
-  running, it doesn't start, and gives its memory back. Nintendo starts some
-  system modules only when they're needed, and they fail without room. The
-  overlay and the log say why; turn off a sysmodule you don't need.
+- The overlay shows how much system memory is free with everything loaded.
+  Keep some free: Nintendo starts some system modules only when they're
+  needed, and when there's no room one of them crashes (error 2001-0132,
+  often in `hid`). If you see that, turn off a sysmodule you don't need.
+- At boot tailscale-nx starts before most other sysmodules, so it can't
+  tell yet how much they will leave. Started later from the overlay, it
+  can: if less than 1 MB would be left, it doesn't start, and the overlay
+  and the log say why.
 
 ## Troubleshooting
 

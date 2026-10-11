@@ -460,6 +460,7 @@ namespace ams::bsd_mitm {
             }
 
             ~BsdMitmService() {
+                FlushRepeats();
                 m_state.reset();  // its sockets close while the session still counts
                 if (m_client_info.program_id.value == SysFtpdProgramId) g_live_sys_ftpd_sessions--;
                 g_live_sessions--;
@@ -487,14 +488,35 @@ namespace ams::bsd_mitm {
 
             // Reply, logging real failures of calls that set sockets up
             // (would-block and in-progress are normal), a few per session.
+            // The same failure again and again (Moonlight asking for ever
+            // smaller buffers) is one line plus a count.
             Result ReplyLogged(const char *call, s32 fd, sf::Out<s32> &ret, sf::Out<s32> &err, const VResult &r) {
-                if (r.ret < 0 && r.err != 11 && r.err != 115 && m_failures_logged < 32) {
-                    m_failures_logged++;
-                    Log("bsd mitm: pid %lu %s(fd %d) failed: errno %d", m_client_info.process_id.value, call, fd, r.err);
+                if (r.ret < 0 && r.err != 11 && r.err != 115) {
+                    if (call == m_last_call && fd == m_last_fd && r.err == m_last_err) {
+                        m_repeats++;
+                    } else {
+                        FlushRepeats();
+                        if (m_failures_logged < 32) {
+                            m_failures_logged++;
+                            Log("bsd mitm: pid %lu %s(fd %d) failed: errno %d", m_client_info.process_id.value, call, fd, r.err);
+                        }
+                        m_last_call = call, m_last_fd = fd, m_last_err = r.err;
+                    }
+                } else if (r.ret >= 0 && call == m_last_call && fd == m_last_fd) {
+                    FlushRepeats();
+                    m_last_call = nullptr;
                 }
                 return Reply(ret, err, r);
             }
+            void FlushRepeats() {
+                if (m_repeats > 0) Log("bsd mitm: pid %lu %s(fd %d): %d more like it", m_client_info.process_id.value, m_last_call, m_last_fd, m_repeats);
+                m_repeats = 0;
+            }
             int m_failures_logged = 0;
+            const char *m_last_call = nullptr;  // the last failure logged (string literals)
+            s32 m_last_fd = -1;
+            int m_last_err = 0;
+            int m_repeats = 0;
 
         public:
             Result Socket(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 domain, s32 type, s32 protocol) {

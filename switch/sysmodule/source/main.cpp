@@ -845,7 +845,9 @@ namespace ams {
         }
         // Our memory was taken when we were launched; if that left the
         // system short, give it back now (exiting), before anything needs it.
-        // Not a failure for the crash guard.
+        // Not a failure for the crash guard. Only useful for a start from the
+        // overlay: at boot most other sysmodules start after us (about 14 MB
+        // later on a typical setup), so plenty is still free here.
         u64 sys_free = 0, sys_total = 0;
         const bool pool_known = memory::SystemPool(&sys_free, &sys_total);
         Log("memory: %lu KB (fixed); system memory free: %lu KB of %lu KB", static_cast<unsigned long>(memory::Own() / 1024),

@@ -21,7 +21,7 @@ hostname=nintendo-switch
 # Memory for tailnet sockets, shared by all apps (KB, 128-384, default 320).
 # TCP connections get smaller buffers as it fills, so about 17 fit at once by
 # default; raise it only if apps report "no buffer space" (errno 105). It
-# comes out of the sysmodule's fixed 832 KB heap.
+# comes out of the sysmodule's fixed heap (about 820 KB).
 # overlay_budget_kb=320
 # A 5-second "Connected. IP: ..." toast after each boot (also switchable in
 # the overlay).
