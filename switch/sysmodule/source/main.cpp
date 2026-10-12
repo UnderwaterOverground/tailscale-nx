@@ -200,7 +200,9 @@ namespace ams {
         template <class F>
         void Timed(const char *what, F &&f) {
             const u64 t0 = armTicksToNs(armGetSystemTick());
+            status::EngineStep(what);
             f();
+            status::EngineStep(nullptr);
             const u64 ms = (armTicksToNs(armGetSystemTick()) - t0) / 1'000'000;
             if (ms >= 500) Log("slow: %s took %llu ms", what, static_cast<unsigned long long>(ms));
         }
@@ -372,29 +374,46 @@ namespace ams {
 
         // ---- network -----------------------------------------------------
 
+        bool NetworkUp() {
+            NifmInternetConnectionStatus status;
+            return R_SUCCEEDED(nifmGetInternetConnectionStatus(nullptr, nullptr, &status)) &&
+                   status == NifmInternetConnectionStatus_Connected;
+        }
+
         // DNS through the servers nifm reports (the system resolver can't be
-        // used from a sysmodule), falling back to public resolvers.
+        // used from a sysmodule), falling back to public resolvers. It blocks
+        // the engine loop, so: nothing at all while offline (every reconnect
+        // attempt would wait out each server), and about 3 s at most.
         int ResolveViaDns(const char *host, u32 *out) {
+            struct Done {
+                ~Done() { status::EngineStep(nullptr); }
+            } done;
+            status::EngineStep("DNS lookup (network status)");
+            if (!NetworkUp()) {
+                errno = ENETUNREACH;
+                return -1;
+            }
             u32 ip = 0, mask = 0, gw = 0, dns1 = 0, dns2 = 0;
             u32 servers[4] = {};
             int n = 0;
-            if (R_SUCCEEDED(nifmGetCurrentIpConfigInfo(&ip, &mask, &gw, &dns1, &dns2))) {
+            status::EngineStep("DNS lookup (network settings)");
+            const bool have_config = R_SUCCEEDED(nifmGetCurrentIpConfigInfo(&ip, &mask, &gw, &dns1, &dns2));
+            status::EngineStep("DNS lookup");
+            if (have_config) {
                 if (dns1) servers[n++] = dns1;
                 if (dns2) servers[n++] = dns2;
             }
             servers[n++] = inet_addr("1.1.1.1");
             servers[n++] = inet_addr("8.8.8.8");
+            const u64 deadline = armTicksToNs(armGetSystemTick()) + 3'000'000'000ull;
             for (int i = 0; i < n; i++) {
-                if (tsnx_dns_query_a(servers[i], host, out, 2000) == 0) return 0;
+                const u64 now = armTicksToNs(armGetSystemTick());
+                if (now >= deadline) break;
+                const int timeout_ms = static_cast<int>(std::min<u64>(1500, (deadline - now) / 1'000'000));
+                if (tsnx_dns_query_a(servers[i], host, out, timeout_ms) == 0) return 0;
                 Log("dns: %s via %s failed: errno %d", host, inet_ntoa(in_addr{servers[i]}), errno);
             }
             return -1;
-        }
-
-        bool NetworkUp() {
-            NifmInternetConnectionStatus status;
-            return R_SUCCEEDED(nifmGetInternetConnectionStatus(nullptr, nullptr, &status)) &&
-                   status == NifmInternetConnectionStatus_Connected;
         }
 
         u32 CurrentIp() {
@@ -422,11 +441,13 @@ namespace ams {
 
         // ---- update check --------------------------------------------------
 
-        // Once per boot, a while after starting (out of the way of joining
-        // the tailnet): a newer release on GitHub gets a toast. Failures are
-        // only logged. Off with update_check=off or the overlay's switch.
+        // Once per boot, soon after connecting (once the "Connected" toast
+        // is gone), or a minute after starting if it doesn't connect: a newer
+        // release on GitHub gets a toast. Failures are only logged. Off with
+        // update_check=off or the overlay's switch.
         constexpr const char NoUpdateCheckPath[] = "sdmc:/config/tailscale-nx/no-update-check";
-        constexpr u64 UpdateCheckDelayNs = 30'000'000'000ull;
+        constexpr u64 UpdateCheckAfterConnectNs = 10'000'000'000ull;
+        constexpr u64 UpdateCheckLatestNs = 60'000'000'000ull;
         constexpr u32 UpdateCheckTimeoutMs = 30'000;
 
         constinit bool g_update_check = false;  // still to do this boot
@@ -437,7 +458,8 @@ namespace ams {
         void StepUpdateCheck(u64 now) {
             if (!g_update_check) return;
             if (!g_update) {
-                if (g_update_check_at_ns == 0) g_update_check_at_ns = now + UpdateCheckDelayNs;
+                if (g_update_check_at_ns == 0) g_update_check_at_ns = now + UpdateCheckLatestNs;
+                if (status::IsConnected()) g_update_check_at_ns = std::min(g_update_check_at_ns, now + UpdateCheckAfterConnectNs);
                 if (now < g_update_check_at_ns) return;
                 if (!NetworkUp()) {
                     g_update_check_at_ns = now + 5'000'000'000ull;

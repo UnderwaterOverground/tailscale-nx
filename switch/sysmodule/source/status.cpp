@@ -39,6 +39,10 @@ namespace ams::status {
         constinit u64 g_control_lost_ns = 0;
         constexpr u64 ReconnectingAfterNs = 10'000'000'000ull;
         constinit std::atomic<u64> g_engine_ran_ns = 0;
+        // What the engine loop is doing outside the engine itself (nullptr:
+        // the engine), and whether its current stall has been logged.
+        constinit std::atomic<const char *> g_engine_step = nullptr;
+        constinit std::atomic<bool> g_stall_logged = false;
 
         u64 NowNs() { return armTicksToNs(armGetSystemTick()); }
 
@@ -299,11 +303,27 @@ namespace ams::status {
         const u64 ran = g_engine_ran_ns;
         const u64 idle_s = ran && now > ran ? (now - ran) / 1'000'000'000ull : 0;
         if (idle_s >= 3 && s.state != TSNX_CTL_PAUSED && s.state != TSNX_CTL_STOPPING) s.engine_stalled_s = static_cast<u32>(idle_s);
+        // A stuck loop can't log where it is: say it from here (the overlay
+        // asks twice a second while it's open).
+        if (s.engine_stalled_s >= 10 && !g_stall_logged.exchange(true)) {
+            const char *step = g_engine_step;
+            const char *driver = tsnx_driver_step();
+            Log("engine loop stuck for %u s, in: %s (driver's last step: %s)", s.engine_stalled_s, step ? step : "the engine",
+                driver ? driver : "none");
+        }
         return s;
     }
 
     void EngineRan(u64 now_ns) {
         g_engine_ran_ns = now_ns;
+        if (g_stall_logged.load(std::memory_order_relaxed)) {
+            g_stall_logged = false;
+            Log("engine loop running again");
+        }
+    }
+
+    void EngineStep(const char *what) {
+        g_engine_step = what;
     }
 
     void SetOffline(bool offline) {
@@ -324,6 +344,11 @@ namespace ams::status {
 
     bool IsPaused() {
         return g_paused;
+    }
+
+    bool IsConnected() {
+        std::scoped_lock lk(g_mutex);
+        return g_status.state == TSNX_CTL_CONNECTED;
     }
 
     void SetStopping() {

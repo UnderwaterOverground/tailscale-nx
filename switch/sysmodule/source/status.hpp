@@ -26,6 +26,9 @@ namespace ams::status {
     // The engine loop ran a round (engine thread); GetStatus reports how
     // long ago, so a stuck engine shows as such in the overlay.
     void EngineRan(u64 now_ns);
+    // What the engine loop is busy with outside the engine (nullptr when
+    // done), named in the log if it gets stuck there.
+    void EngineStep(const char *what);
     // Whether the console has an internet connection (engine thread).
     void SetOffline(bool offline);
 
@@ -42,6 +45,8 @@ namespace ams::status {
     // Pauses or resumes Tailscale (persisted). Not from the engine thread.
     void SetPaused(bool paused);
     bool IsPaused();
+    // Joined the tailnet (not starting, logging in or paused).
+    bool IsConnected();
 
     // Stopped from the overlay: TSNX_CTL_STOPPING from now on, and no login
     // prompt left behind for a process that is going away.

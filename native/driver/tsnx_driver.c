@@ -24,6 +24,13 @@ int tsnx_snprintf(char *dst, size_t size, const char *fmt, ...);
 #endif
 
 #define MAX_CONNS (TSNX_DRIVER_MAX_FDS - 1)
+// Datagrams read per readiness report: the rest wait for the next round, so
+// a socket that keeps "returning" something can't hold the loop.
+#define UDP_RECV_BATCH 64
+
+static const char *volatile g_step;
+#define STEP(s) (g_step = (s))
+const char *tsnx_driver_step(void) { return g_step; }
 #define RECV_CHUNK 16384
 
 typedef struct {
@@ -204,6 +211,7 @@ int tsnx_driver_resume(TsnxDriver *d) {
 }
 
 static void udp_send(TsnxDriver *d, const TsnxAddr *to, const uint8_t *data, size_t len) {
+    STEP("UDP send");
     if (d->udp_fd < 0 || to->family != 4) return;  // IPv6 underlay: not yet
     struct sockaddr_in sin = {0};
     sin.sin_family = AF_INET;
@@ -214,12 +222,14 @@ static void udp_send(TsnxDriver *d, const TsnxAddr *to, const uint8_t *data, siz
 }
 
 static void udp_receive(TsnxDriver *d) {
-    for (;;) {
+    for (int i = 0; i < UDP_RECV_BATCH; i++) {
+        STEP("UDP receive");
         struct sockaddr_in from;
         socklen_t flen = sizeof from;
+        memset(&from, 0, sizeof from);
         ssize_t got = recvfrom(d->udp_fd, d->rbuf, sizeof d->rbuf, 0, (struct sockaddr *)&from, &flen);
         if (got < 0) return;
-        if (from.sin_family != AF_INET) continue;
+        if (from.sin_family != AF_INET) return;  // nothing usable: try next round
         TsnxAddr src;
         to_tsnx_addr(&from, &src);
         tsnx_engine_udp(d->engine, &src, d->rbuf, (size_t)got, tsnx_driver_now_ns());
@@ -227,6 +237,7 @@ static void udp_receive(TsnxDriver *d) {
 }
 
 static void do_connect(TsnxDriver *d, uint32_t id, const char *target, uint16_t port) {
+    STEP("TCP connect");
     char host[256];
     snprintf(host, sizeof host, "%s", target);
     map_target(d, host, sizeof host, &port);
@@ -268,8 +279,10 @@ static void do_connect(TsnxDriver *d, uint32_t id, const char *target, uint16_t 
 
 // Writes as much buffered data as the socket takes. Returns -1 on error.
 static int conn_flush(Conn *c) {
+    STEP("TCP send");
     while (c->wlen > 0) {
         ssize_t n = send(c->fd, c->wbuf, c->wlen, 0);
+        if (n == 0) return 0;  // nothing taken: try when it's writable again
         if (n < 0) return (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) ? 0 : -1;
         memmove(c->wbuf, c->wbuf + n, c->wlen - (size_t)n);
         c->wlen -= (size_t)n;
@@ -299,6 +312,7 @@ static void pump_taildrop(TsnxDriver *d);
 
 // Drains engine I/O requests and events.
 static void pump_engine(TsnxDriver *d) {
+    STEP("engine I/O");
     TsnxIo io;
     while (tsnx_engine_poll_io(d->engine, &io)) {
         Conn *c;
@@ -458,6 +472,7 @@ void tsnx_driver_dispatch(TsnxDriver *d, const struct pollfd *fds) {
         }
         if (re & POLLIN) {
             for (;;) {
+                STEP("TCP receive");
                 ssize_t got = recv(c->fd, d->rbuf, sizeof d->rbuf, 0);
                 if (got > 0) {
                     tsnx_engine_data(d->engine, c->id, d->rbuf, (size_t)got, tsnx_driver_now_ns());

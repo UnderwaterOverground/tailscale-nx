@@ -24,6 +24,10 @@ void tsnx_driver_free(TsnxDriver *d);
 // then works over DERP only).
 int tsnx_driver_open_udp(TsnxDriver *d, uint16_t port);
 
+// The last place the driver entered (a static string, NULL before any): if
+// the thread driving it seems stuck, this names where it went last.
+const char *tsnx_driver_step(void);
+
 // Re-detects the local IP and re-advertises endpoints (call after network
 // changes).
 void tsnx_driver_refresh_endpoints(TsnxDriver *d);

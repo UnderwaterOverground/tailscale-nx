@@ -3,6 +3,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -67,6 +68,9 @@ int tsnx_dns_query_a(uint32_t server_be, const char *host, uint32_t *out, int ti
 
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) return -1;
+    // Non-blocking: only poll() waits, and only for timeout_ms.
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
     struct sockaddr_in to;
     memset(&to, 0, sizeof to);
     to.sin_family = AF_INET;
