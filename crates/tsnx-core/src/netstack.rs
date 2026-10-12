@@ -38,6 +38,8 @@ mod limits {
     /// Datagrams queued per UDP socket (bytes, counting allocation size).
     pub const UDP_RX: usize = 512 << 10;
     pub const BUDGET: usize = usize::MAX;
+    /// Packets waiting for the tunnel (see `Queues`).
+    pub const OUT_PKTS: usize = 256;
 }
 // Measured on the console: a Moonlight stream keeps 0-6 KB queued while the
 // app reads; only a suspended app (HOME menu) fills a queue, and stale video
@@ -49,6 +51,7 @@ mod limits {
     pub const UDP_RX: usize = 64 << 10;
     /// Default; the sysmodule's config can change it (`set_budget`).
     pub const BUDGET: usize = 320 << 10;
+    pub const OUT_PKTS: usize = 64;
 }
 use limits::*;
 /// Smallest TCP buffer (each direction): a few full-size segments.
@@ -92,10 +95,20 @@ pub struct Readiness {
 }
 
 /// Packet queues that smoltcp reads from and writes to.
+// The engine drains `outbound` every time it runs. While it doesn't (paused,
+// or asleep) apps' datagrams would pile up without limit and exhaust the heap,
+// so past OUT_PKTS new ones are dropped, as a full network card would, and TCP
+// keeps its data in the socket's send buffer until the next poll.
 #[derive(Default)]
 struct Queues {
     inbound: VecDeque<Vec<u8>>,
     outbound: VecDeque<Vec<u8>>,
+}
+
+impl Queues {
+    fn outbound_full(&self) -> bool {
+        self.outbound.len() >= OUT_PKTS
+    }
 }
 
 struct RxToken(Vec<u8>);
@@ -126,6 +139,9 @@ impl Device for Queues {
     }
 
     fn transmit(&mut self, _: smoltcp::time::Instant) -> Option<TxToken<'_>> {
+        if self.outbound_full() {
+            return None;
+        }
         Some(TxToken(&mut self.outbound))
     }
 
@@ -371,7 +387,9 @@ impl Netstack {
         let Some(Sock::Udp { port, .. }) = self.socks.get(&id) else { return Err(NetError::InvalidSocket) };
         let src = self.addrs.iter().copied().find(|a| a.is_ipv4() == dst.is_ipv4()).ok_or(NetError::Invalid)?;
         let pkt = udp::build(SocketAddr::new(src, *port), dst, data, MTU).ok_or(NetError::Invalid)?;
-        self.dev.outbound.push_back(pkt);
+        if !self.dev.outbound_full() {
+            self.dev.outbound.push_back(pkt);
+        }
         Ok(())
     }
 
@@ -859,6 +877,28 @@ mod tests {
         assert_eq!(out.len(), 1, "expected an echo reply");
         assert_eq!(out[0][20], 0, "ICMP type 0 = echo reply");
         assert_eq!(&out[0][16..20], &[100, 64, 0, 1]);
+    }
+
+    /// While nothing drains the outbound queue (the engine is paused), an
+    /// app's datagrams are dropped past OUT_PKTS instead of exhausting the
+    /// heap, and TCP waits in its send buffer.
+    #[test]
+    fn outbound_queue_is_bounded() {
+        let a_ip = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1));
+        let b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2)), 47998);
+        let mut net = Netstack::new(Instant::from_millis(0));
+        net.set_addresses(&[a_ip]);
+        let udp = net.udp_bind(0).unwrap();
+        for _ in 0..10 * OUT_PKTS {
+            net.udp_send_to(udp, &[0u8; 1000], b).unwrap();
+        }
+        let tcp = net.tcp_connect(SocketAddr::new(b.ip(), 48010)).unwrap();
+        net.poll(Instant::from_millis(1));
+        assert_eq!(net.take_outbound().count(), OUT_PKTS);
+        let _ = tcp;
+        // Drained: the TCP SYN that waited goes out on the next poll.
+        net.poll(Instant::from_millis(2));
+        assert_eq!(net.take_outbound().count(), 1);
     }
 
     /// Two stacks wired back to back exchange a TCP stream and a datagram.

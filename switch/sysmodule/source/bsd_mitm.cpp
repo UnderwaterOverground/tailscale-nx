@@ -554,6 +554,7 @@ namespace ams::bsd_mitm {
 
             Result Send(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, s32 flags, const sf::InAutoSelectBuffer &buf) {
                 R_UNLESS(Virtual(fd), sm::mitm::ResultShouldForwardToSession());
+                if (status::IsPaused()) R_RETURN(Reply(out_ret, out_errno, VResult{-1, WireENetUnreach}));
                 R_RETURN(Reply(out_ret, out_errno, V()->Send(fd, buf.GetPointer(), buf.GetSize(), flags)));
             }
 
@@ -649,6 +650,7 @@ namespace ams::bsd_mitm {
 
             Result Write(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, const sf::InAutoSelectBuffer &buf) {
                 R_UNLESS(Virtual(fd), sm::mitm::ResultShouldForwardToSession());
+                if (status::IsPaused()) R_RETURN(Reply(out_ret, out_errno, VResult{-1, WireENetUnreach}));
                 R_RETURN(Reply(out_ret, out_errno, V()->Send(fd, buf.GetPointer(), buf.GetSize(), 0)));
             }
 
@@ -675,6 +677,7 @@ namespace ams::bsd_mitm {
                     return nullptr;
                 };
                 R_UNLESS(Virtual(fd) || ::tsnx::VSock::IsTailnet(dest(msgs[0])), sm::mitm::ResultShouldForwardToSession());
+                if (status::IsPaused() && (dest(msgs[0]) == nullptr || ::tsnx::VSock::IsTailnet(dest(msgs[0])))) R_RETURN(Reply(out_ret, out_errno, VResult{-1, WireENetUnreach}));
 
                 s32 sent = 0;
                 VResult last = VResult::Ok(0);
