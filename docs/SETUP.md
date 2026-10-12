@@ -108,9 +108,9 @@ Until either happens, the Switch can't reach the tailnet.
   in the overlay.
 - **Taildrop:** send files to the Switch from your other devices (see
   [below](#taildrop)).
-- **Update notice:** 30 seconds after each boot, tailscale-nx asks GitHub
-  for the latest release. If it's newer than the installed one, a
-  10-second toast says so. If GitHub can't be reached, nothing happens (the
+- **Update notice:** after each boot, 10 seconds after it connects,
+  tailscale-nx asks GitHub for the latest release. If it's newer than the
+  installed one, a 10-second toast says so. If GitHub can't be reached, nothing happens (the
   reason is in `sysmodule.log`). This request shows GitHub the console's
   public IP address, as any web request does. Nothing else is sent. Turn
   it off with **Check for updates** in the overlay.
@@ -252,6 +252,9 @@ sockets use more of that heap, up to the `overlay_budget_kb` limit.
   Keep some free: Nintendo starts some system modules only when they're
   needed, and when there's no room one of them crashes (error 2001-0132,
   often in `hid`). If you see that, turn off a sysmodule you don't need.
+  - This is the room left under the system's limit for sysmodules, the
+    figure those crashes depend on. Other overlays, such as Sysmodules, may
+    show a higher figure: they count unused memory instead.
 - At boot tailscale-nx starts before most other sysmodules, so it can't
   tell yet how much they will leave. Started later from the overlay, it
   can: if less than 1 MB would be left, it doesn't start, and the overlay

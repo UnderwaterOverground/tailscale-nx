@@ -222,6 +222,7 @@ namespace {
 
     // A stop or start that didn't happen (shown in red).
     void Say(const char *first, const char *second = "") {
+        std::memset(g_msg, 0, sizeof g_msg);  // see DrawMessage
         std::snprintf(g_msg[0], sizeof g_msg[0], "%s", first);
         std::snprintf(g_msg[1], sizeof g_msg[1], "%s", second);
         g_msg_problem = true;
@@ -381,7 +382,7 @@ namespace {
                     ctl::g_wanted = true;
                     SetPhase(Phase::Idle);
                     ReadWhyNotRunning();
-                    Note("Stopped. It starts again at boot,", "or with Start tailscale-nx above.");
+                    Note("Stopped. It starts again at the next boot.");
                 } else if (PhaseSeconds() >= 10) {
                     Note("Still stopping...");
                 }
@@ -474,9 +475,18 @@ namespace {
             if (std::strlen(rest) > cols) std::snprintf(second, sizeof second, "%.*s...", static_cast<int>(cols - 3), rest);
             else std::snprintf(second, sizeof second, "%s", rest);
         }
-        r->drawString(first, false, x, y, size, r->a(c));
+        if (first[0]) r->drawString(first, false, x, y, size, r->a(c));  // see DrawMessage
         if (second[0]) r->drawString(second, false, x, y + size + 3, size, r->a(c));
     }
+
+    // No internet connection (not while paused or stopping: then it's moot).
+    bool Offline() {
+        return (g_status.flags & TSNX_CTL_FLAG_OFFLINE) && g_status.state != TSNX_CTL_PAUSED && g_status.state != TSNX_CTL_STOPPING;
+    }
+
+    // Its engine loop hasn't run for a while (short pauses are normal: a
+    // DNS lookup or an SD card write can take a few seconds).
+    bool Stalled() { return g_status.engine_stalled_s >= 10; }
 
     void DrawStatus(tsl::gfx::Renderer *r, s32 x, s32 y, s32 w, s32 h) {
         const char *state = "Not running";
@@ -488,10 +498,10 @@ namespace {
         // The sysmodule hasn't answered a request: it's busy or stuck.
         if (const u64 busy = ctl::BusySeconds(); busy >= 2) {
             char since[64];
-            std::snprintf(since, sizeof since, "tailscale-nx hasn't answered for %llu s.", static_cast<unsigned long long>(busy));
+            std::snprintf(since, sizeof since, "No reply from tailscale-nx for %llu seconds.", static_cast<unsigned long long>(busy));
             r->drawString("Not responding", false, x + 20, y + 40, 30, r->a(Red));
             r->drawString(since, false, x + 20, y + 75, 17, r->a(Grey));
-            r->drawString("If it stays like this, restart the console.", false, x + 20, y + 100, 17, r->a(Grey));
+            r->drawString("Restart the console if this continues.", false, x + 20, y + 100, 17, r->a(Grey));
             return;
         }
         if (!g_valid) {
@@ -512,6 +522,13 @@ namespace {
                 case TSNX_CTL_CONNECTED:   state = "Connected";            color = Green;  break;
                 case TSNX_CTL_PAUSED:      state = "Paused";               color = Grey;   break;
                 case TSNX_CTL_STOPPING:    state = "Stopping...";          color = Grey;   break;
+            }
+            if (Offline()) {
+                state = "Offline";
+                color = Grey;
+            } else if (Stalled()) {
+                state = "Not responding";
+                color = Red;
             }
         }
         r->drawString(state, false, x + 20, y + 40, 30, r->a(color));
@@ -539,16 +556,16 @@ namespace {
             }
             return;
         }
-        if (g_status.engine_stalled_s) {
-            // It answers, but its engine hasn't run: it can't connect.
-            std::snprintf(line, sizeof line, "Stuck: its engine hasn't run for %u s.", g_status.engine_stalled_s);
-            r->drawString(line, false, x + 20, y + 75, 17, r->a(Red));
-            r->drawString("If it stays like this, restart the console.", false, x + 20, y + 102, 17, r->a(Grey));
+        if (Offline()) {
+            r->drawString("No internet connection.", false, x + 20, y + 75, 17, r->a(Grey));
+            r->drawString("It reconnects once the Switch is back online.", false, x + 20, y + 102, 17, r->a(Grey));
             return;
         }
-        if (g_status.state != TSNX_CTL_CONNECTED && (g_status.flags & TSNX_CTL_FLAG_OFFLINE)) {
-            r->drawString("No internet connection.", false, x + 20, y + 75, 17, r->a(Grey));
-            r->drawString("It connects once the Switch is online.", false, x + 20, y + 102, 17, r->a(Grey));
+        if (Stalled()) {
+            // It answers, but its engine loop hasn't run: it can't connect.
+            std::snprintf(line, sizeof line, "It has made no progress for %u seconds.", g_status.engine_stalled_s);
+            r->drawString(line, false, x + 20, y + 75, 17, r->a(Grey));
+            r->drawString("Restart the console if this continues.", false, x + 20, y + 102, 17, r->a(Grey));
             return;
         }
         // Our address only while it's usable (it stays known while paused).
@@ -613,8 +630,10 @@ namespace {
     // The outcome of the last stop or start.
     void DrawMessage(tsl::gfx::Renderer *r, s32 x, s32 y, s32 w, s32 h) {
         const tsl::Color c = g_msg_problem ? Red : White;
-        r->drawString(g_msg[0], false, x + 20, y + 22, 15, r->a(c));
-        r->drawString(g_msg[1], false, x + 20, y + 42, 15, r->a(c));
+        // Never an empty string: Tesla's drawString reads one character past
+        // its end before checking, so "" would draw whatever follows it.
+        if (g_msg[0][0]) r->drawString(g_msg[0], false, x + 20, y + 22, 15, r->a(c));
+        if (g_msg[1][0]) r->drawString(g_msg[1], false, x + 20, y + 42, 15, r->a(c));
     }
 
     void DrawTip(tsl::gfx::Renderer *r, s32 x, s32 y, s32 w, s32 h) {
@@ -689,8 +708,8 @@ namespace {
                 notice->setStateChangedListener([](bool on) { SetMarker(NoNoticePath, !on); });
                 list->addItem(notice);
 
-                // The sysmodule's check for a newer release on GitHub, 30 s
-                // after boot (a toast if there is one).
+                // The sysmodule's check for a newer release on GitHub, once
+                // per boot soon after connecting (a toast if there is one).
                 auto *updates = new tsl::elm::ToggleListItem("Check for updates", !MarkerExists(NoUpdateCheckPath));
                 updates->setStateChangedListener([](bool on) { SetMarker(NoUpdateCheckPath, !on); });
                 list->addItem(updates);

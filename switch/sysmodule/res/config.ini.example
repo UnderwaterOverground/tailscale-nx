@@ -30,6 +30,6 @@ hostname=nintendo-switch
 # taildrop=on
 # Reach networks shared by your tailnet's subnet routers (off: ignore them).
 # accept_routes=on
-# Ask GitHub for the latest release 30 seconds after each boot, and show a
-# toast if it's newer (also switchable in the overlay).
+# Ask GitHub for the latest release once per boot, 10 seconds after
+# connecting, and show a toast if it's newer (also switchable in the overlay).
 # update_check=on
