@@ -21,7 +21,9 @@ see the tailnet.
 
 ## Install
 
-Copy these to the SD card, merging folders:
+The [README](../README.md#install) walks through it step by step, including
+how to copy the files on Windows and on a Mac. In short, copy these to the SD
+card, adding them to the folders already there:
 
 | Path | What |
 |---|---|
@@ -275,7 +277,7 @@ sockets use more of that heap, up to the `overlay_budget_kb` limit.
     server. tailscale-nx keeps trying and reconnects on its own. On hotel or
     café Wi-Fi, sign in to the network first. If it stays like this, the
     overlay shows the last error.
-- **The overlay says "Not responding" or "Stuck".**
+- **The overlay says "Not responding".**
   - tailscale-nx has stopped answering. Restart the console, and send us
     `sysmodule.log.1` (the boot before the restart).
 - **What happened?**

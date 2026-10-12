@@ -38,32 +38,101 @@ without opening ports on your router.
   over the tailnet.
 - **Small:** exactly 2.5 MB of memory, fixed when it starts.
 
-## Requirements
+## Before you start
 
-- A Switch running [Atmosphère](https://github.com/Atmosphere-NX/Atmosphere)
-  custom firmware. Tested with Atmosphère 1.12.0 on firmware 22.5.0
-  (Mariko).
-- [Ultrahand Overlay](https://github.com/ppkantorski/Ultrahand-Overlay):
-  optional, but needed for the overlay and the on-screen login prompt.
-- A [Tailscale](https://tailscale.com) account, or a
-  [headscale](https://headscale.net) server.
+You need:
+
+- **A Switch with [Atmosphère](https://github.com/Atmosphere-NX/Atmosphere)**
+  custom firmware. If you're not sure what that is, follow the
+  [NH Switch Guide](https://switch.hacks.guide/) first. Tested with
+  Atmosphère 1.12.0 on firmware 22.5.0 (Mariko).
+- **[Ultrahand Overlay](https://github.com/ppkantorski/Ultrahand-Overlay)**.
+  To check you have it, press **L + D-pad Down + R3** (R3 is pressing the
+  right stick in) on the home screen: a menu should appear over the screen.
+  You can do without it (see the [setup guide](docs/SETUP.md)), but logging
+  in is much easier with it.
+- **A free [Tailscale](https://tailscale.com) account**, with Tailscale
+  installed on the PC or other device you want the Switch to reach.
+  A [headscale](https://headscale.net) server works too.
 
 ## Install
 
-1. Download `tailscale-nx-<version>.zip` from the
-   [latest release](https://github.com/UnderwaterOverground/tailscale-nx/releases/latest).
-2. Extract it to the root of your SD card, merging folders.
-3. Restart the console.
-4. Within a minute, a **"Tailscale: log in needed"** notification appears.
-   Open the overlay (default **L + D-pad Down + R3**), choose
-   **Tailscale**, scan the QR code with your phone, and approve the Switch.
+### 1. Download
 
-That's it: the overlay shows **Connected** and the Switch's `100.x`
-address. **Turn off key expiry** for the Switch in the Tailscale admin
-console, so it never has to log in again.
+Open the [latest release](https://github.com/UnderwaterOverground/tailscale-nx/releases/latest)
+and, under **Assets**, download **`tailscale-nx-<version>.zip`** (not "Source
+code"). Unzip it. Inside are three folders: **`atmosphere`**, **`config`**
+and **`switch`**.
 
-The [setup guide](docs/SETUP.md) covers auth keys, key expiry, all
-settings, sys-ftpd and troubleshooting.
+### 2. Copy it to the SD card
+
+Turn the Switch off (hold the power button, then **Power Options → Turn
+Off**), take out the SD card and put it in your computer.
+
+The SD card already has `atmosphere` and `switch` folders. The new files go
+*inside* them, next to what's already there. Nothing on the card gets
+deleted.
+
+- **Windows:** select the three folders and drag them onto the SD card
+  itself (not into a folder on it). If Windows asks about files with the same
+  name, choose **Replace the files in the destination**.
+- **Mac:** don't drag the three folders onto the card: Finder would
+  *replace* your whole `atmosphere` folder instead of adding to it. Copy
+  these two items one at a time instead:
+
+  | From the zip | Drag it into this folder on the SD card |
+  |---|---|
+  | `atmosphere/contents/4200000000005453` | `atmosphere/contents` |
+  | `switch/.overlays/tailscale-nx.ovl` | `switch/.overlays` |
+
+  Folders starting with a dot are hidden on a Mac: press
+  **Cmd + Shift + .** in Finder to show them. If Finder asks whether to
+  replace an older version, choose **Replace**.
+
+**Check it:** the SD card should now have these two files. If there's a
+folder called `tailscale-nx-…` on the card, the files are in the wrong place:
+move its contents out to the top of the card.
+
+```
+atmosphere/contents/4200000000005453/exefs.nsp
+switch/.overlays/tailscale-nx.ovl
+```
+
+Put the SD card back in the Switch and turn it on as you normally would.
+
+### 3. Log in
+
+1. Wait for a **"Tailscale: log in needed"** notification. It appears within
+   a minute of the Switch connecting to Wi-Fi.
+2. Press **L + D-pad Down + R3** to open Ultrahand and choose **Tailscale**.
+3. Scan the QR code with your phone's camera, log in to Tailscale and
+   approve the Switch.
+4. The overlay changes to **Connected** and shows the Switch's address,
+   starting `100.`. You're done.
+
+### 4. Stop it logging out after 6 months
+
+Tailscale makes devices log in again every 180 days. To stop that for the
+Switch, open the [Machines](https://login.tailscale.com/admin/machines) page,
+find **nintendo-switch**, open its **⋯** menu and choose **Disable key
+expiry**.
+
+### It didn't work
+
+- **No notification after a few minutes:** check the two files above are in
+  exactly those places, and that you restarted the Switch (not just put it to
+  sleep and woke it).
+- **There's no Tailscale in Ultrahand's menu:** `tailscale-nx.ovl` isn't in
+  `switch/.overlays`.
+- **Something else:** see [troubleshooting](docs/SETUP.md#troubleshooting).
+
+### Updating
+
+Download the new zip and copy it over the old files the same way. Your login
+and settings are kept. Restart the Switch afterwards.
+
+The [setup guide](docs/SETUP.md) covers logging in with an auth key instead,
+all the settings, sys-ftpd and more.
 
 ## Using it with Moonlight
 
