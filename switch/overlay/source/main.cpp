@@ -547,13 +547,14 @@ namespace {
         else std::snprintf(out, cap, "Relayed");
     }
 
-    // The path, in its colour, then the name (at x + name_x if given): the
-    // path comes first, so a long name is what gets cut.
-    void DrawPeer(tsl::gfx::Renderer *r, const TsnxCtlPeer &p, s32 x, s32 y, s32 w, u32 size, s32 name_x = 0) {
+    tsl::Color PathColor(const TsnxCtlPeer &p) { return p.direct ? Green : Yellow; }
+
+    // The path, in its colour, then the name: the path comes first, so a
+    // long name is what gets cut.
+    void DrawPeer(tsl::gfx::Renderer *r, const TsnxCtlPeer &p, s32 x, s32 y, s32 w, u32 size) {
         char path[48];
         PeerPath(p, path, sizeof path);
-        const s32 drawn = static_cast<s32>(r->drawString(path, false, x, y, size, r->a(p.direct ? Green : Yellow)).first) + 10;
-        const s32 used = std::max(drawn, name_x);
+        const s32 used = static_cast<s32>(r->drawString(path, false, x, y, size, r->a(PathColor(p))).first) + 10;
         char name[sizeof p.name + 4];
         Fit(r, p.name, size, w - used, name, sizeof name);
         if (name[0] && std::strcmp(name, "...") != 0) r->drawString(name, false, x + used, y, size, r->a(White));  // see DrawMessage
@@ -767,7 +768,8 @@ namespace {
 
     // ---- GUI ----------------------------------------------------------------
 
-    // The Connections page: every peer in use, a row each, in name order.
+    // The Connections page: every peer in use, a row each, in name order:
+    // its name, and how it's reached at the right.
     // One element that scrolls itself: Tesla's lists scroll by moving focus
     // between items, and items can't safely come and go while one has it,
     // but peers come and go all the time.
@@ -798,13 +800,6 @@ namespace {
                     return;
                 }
                 Follow(n);
-                // Names start in one column, after the widest path.
-                s32 name_x = 0;
-                for (u32 i = 0; i < n; i++) {
-                    char path[48];
-                    PeerPath(g_peers[g_by_name[i]], path, sizeof path);
-                    name_x = std::max(name_x, TextWidth(r, path, 17) + 12);
-                }
                 const s32 top = y + RowsTop, visible = Visible(h);
                 for (u32 row = m_top; row < n && row < m_top + static_cast<u32>(visible); row++) {
                     const TsnxCtlPeer &p = g_peers[g_by_name[row]];
@@ -813,12 +808,20 @@ namespace {
                         r->drawRect(x + 6, ry, w - 12, RowHeight, r->a(Selected));  // a 2-pixel border
                         r->drawRect(x + 8, ry + 2, w - 16, RowHeight - 4, r->a(Black));
                     }
+                    // The name, then the path at the right: never cut, so a
+                    // long name gets whatever room its own path leaves.
+                    char path[48];
+                    PeerPath(p, path, sizeof path);
+                    const s32 path_x = x + w - 20 - TextWidth(r, path, 17);
+                    r->drawString(path, false, path_x, ry + 22, 17, r->a(PathColor(p)));
+                    const s32 room = path_x - 14 - (x + 20);
                     if (!p.name[0]) continue;
-                    if (row == m_sel && TextWidth(r, p.name, 17) > w - 40 - name_x) {
-                        DrawPeer(r, p, x + 20, ry + 22, name_x, 17, name_x);  // no room left: the path only
-                        Marquee(r, p.name, x + 20 + name_x, ry, w - 40 - name_x);
+                    if (row == m_sel && TextWidth(r, p.name, 17) > room) {
+                        Marquee(r, p.name, x + 20, ry, room);
                     } else {
-                        DrawPeer(r, p, x + 20, ry + 22, w - 40, 17, name_x);
+                        char name[sizeof p.name + 4];
+                        Fit(r, p.name, 17, room, name, sizeof name);
+                        if (name[0] && std::strcmp(name, "...") != 0) r->drawString(name, false, x + 20, ry + 22, 17, r->a(White));  // see DrawMessage
                     }
                 }
                 // Where the rows on screen are in the whole list.
@@ -834,7 +837,10 @@ namespace {
 
             tsl::elm::Element *requestFocus(tsl::elm::Element *, tsl::FocusDirection) override { return this; }
 
-            void drawHighlight(tsl::gfx::Renderer *) override {}  // the selected row shows instead
+            // Not Tesla's focus look (a black box and a border round the
+            // whole element): the selected row shows instead.
+            void drawFocusBackground(tsl::gfx::Renderer *) override {}
+            void drawHighlight(tsl::gfx::Renderer *) override {}
 
             // Up and down move the selection (repeating while held, as in
             // Tesla's lists); B goes back.
