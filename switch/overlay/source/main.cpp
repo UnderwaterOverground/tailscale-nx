@@ -549,17 +549,6 @@ namespace {
 
     tsl::Color PathColor(const TsnxCtlPeer &p) { return p.direct ? Green : Yellow; }
 
-    // The path, in its colour, then the name: the path comes first, so a
-    // long name is what gets cut.
-    void DrawPeer(tsl::gfx::Renderer *r, const TsnxCtlPeer &p, s32 x, s32 y, s32 w, u32 size) {
-        char path[48];
-        PeerPath(p, path, sizeof path);
-        const s32 used = static_cast<s32>(r->drawString(path, false, x, y, size, r->a(PathColor(p))).first) + 10;
-        char name[sizeof p.name + 4];
-        Fit(r, p.name, size, w - used, name, sizeof name);
-        if (name[0] && std::strcmp(name, "...") != 0) r->drawString(name, false, x + used, y, size, r->a(White));  // see DrawMessage
-    }
-
     // No internet connection (not while paused or stopping: then it's moot).
     bool Offline() {
         return (g_status.flags & TSNX_CTL_FLAG_OFFLINE) && g_status.state != TSNX_CTL_PAUSED && g_status.state != TSNX_CTL_STOPPING;
@@ -650,10 +639,12 @@ namespace {
             return;
         }
         // Our address only while it's usable (it stays known while paused).
+        s32 ly = y + 75;
         const u8 *ip = g_status.ipv4;
         if (ip[0] && g_status.state == TSNX_CTL_CONNECTED) {
             std::snprintf(line, sizeof line, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
-            r->drawString(line, false, x + 20, y + 75, 20, r->a(White));
+            r->drawString(line, false, x + 20, ly, 20, r->a(White));
+            ly += 27;
         }
         if (g_status.version >= 3) {
             std::snprintf(line, sizeof line, "%u peers", g_status.peers);
@@ -667,22 +658,12 @@ namespace {
             }
             std::snprintf(line, sizeof line, "%u peers%s%s", g_status.peers, relay, (g_status.flags & TSNX_CTL_FLAG_DIRECT) ? ", direct" : "");
         }
-        r->drawString(line, false, x + 20, y + 102, 17, r->a(Grey));
-        // The two peers used most recently (in name order, so they don't
-        // swap places), and whether each is direct or relayed (slower).
-        // Connections lists them all.
-        if (g_status.state == TSNX_CTL_CONNECTED) {
-            const u32 n = std::min<u32>(g_peers_shown, 2);
-            const bool swap = n == 2 && std::strcmp(g_peers[1].name, g_peers[0].name) < 0;
-            for (u32 i = 0; i < n; i++) {
-                const TsnxCtlPeer &p = g_peers[swap ? 1 - i : i];
-                if (p.name[0]) DrawPeer(r, p, x + 20, y + 125 + static_cast<s32>(i) * 21, w - 40, 15);
-            }
-        }
+        r->drawString(line, false, x + 20, ly, 17, r->a(Grey));
+        ly += 28;
         if (g_last_error[0] && g_status.state != TSNX_CTL_CONNECTED && g_status.state != TSNX_CTL_PAUSED) {
             char error[sizeof g_last_error + 16];
             std::snprintf(error, sizeof error, "Last error: %s", g_last_error);
-            DrawTwoLines(r, error, x + 20, y + 130, 15, Grey, 46);
+            DrawTwoLines(r, error, x + 20, ly, 15, Grey, 46);
         }
     }
 
@@ -927,7 +908,7 @@ namespace {
                 Refresh();
                 auto *frame = new tsl::elm::OverlayFrame("Tailscale", "tailscale-nx " APP_VERSION);
                 auto *list = new tsl::elm::List();
-                list->addItem(new Drawer(DrawStatus), 165);
+                list->addItem(new Drawer(DrawStatus), 135);
                 if (!g_status_ok) ReadWhyNotRunning();
 
                 m_toggle = new tsl::elm::ToggleListItem("Tailscale", !(g_status_ok && g_status.state == TSNX_CTL_PAUSED));
