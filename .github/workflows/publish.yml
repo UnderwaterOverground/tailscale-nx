@@ -13,6 +13,9 @@ permissions:
 
 jobs:
   release:
+    # GitHub only. The mirror's Gitea runner runs jobs in a container, where
+    # make's `docker run -v <checkout>:/src` mounts an empty directory.
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
