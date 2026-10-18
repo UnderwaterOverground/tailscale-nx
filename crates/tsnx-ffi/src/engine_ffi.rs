@@ -456,7 +456,8 @@ pub unsafe extern "C" fn tsnx_net_readiness(e: *mut TsnxEngine, id: i32) -> u32 
 pub struct TsnxActivePeer {
     pub name: [c_char; 32],
     pub direct: u8,
-    pub _reserved: [u8; 3],
+    pub _reserved: u8,
+    pub latency_ms: u16,
     pub relay_region: u32,
 }
 
@@ -471,7 +472,9 @@ pub unsafe extern "C" fn tsnx_engine_active_peers(e: *mut TsnxEngine, out: *mut 
             *dst = src as c_char;
         }
         o.direct = p.relay.is_none() as u8;
-        o._reserved = [0; 3];
+        o._reserved = 0;
+        // Rounded up, so a fast LAN path shows 1 ms, not "unknown".
+        o.latency_ms = p.latency.map_or(0, |l| l.as_micros().div_ceil(1000).clamp(1, u16::MAX as u128) as u16);
         o.relay_region = p.relay.unwrap_or(0);
     }
     peers.len()

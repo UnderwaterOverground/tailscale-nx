@@ -5,6 +5,7 @@
 
 #include <dirent.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -420,6 +421,8 @@ namespace {
     char g_last_error[192] = {};
     TsnxCtlPeer g_peers[TSNX_CTL_MAX_PEERS] = {};
     u32 g_peer_count = 0;  // active; the first (up to TSNX_CTL_MAX_PEERS) are in g_peers
+    u32 g_peers_shown = 0;  // how many are in g_peers, most recently used first
+    u8 g_by_name[TSNX_CTL_MAX_PEERS] = {};  // g_peers indices in name order
 
     // The login link as a QR code (encoded once per link).
     uint8_t g_qr[qrcodegen_BUFFER_LEN_MAX];
@@ -443,6 +446,10 @@ namespace {
         g_status = s.status;
         std::memcpy(g_peers, s.peers, sizeof g_peers);
         g_peer_count = s.peer_count;
+        g_peers_shown = std::min<u32>(g_peer_count, TSNX_CTL_MAX_PEERS);
+        for (u32 i = 0; i < g_peers_shown; i++) g_by_name[i] = static_cast<u8>(i);
+        // Listed by name, so rows stay put as traffic moves between peers.
+        std::sort(g_by_name, g_by_name + g_peers_shown, [](u8 a, u8 b) { return std::strcmp(g_peers[a].name, g_peers[b].name) < 0; });
         std::snprintf(g_login_url, sizeof g_login_url, "%s", s.login_url);
         std::snprintf(g_last_error, sizeof g_last_error, "%s", s.last_error);
         if (std::strcmp(g_login_url, g_qr_for) != 0) {
@@ -531,15 +538,22 @@ namespace {
         }
     }
 
-    // How a peer is reached, in its colour, then its name: the path comes
-    // first, so a long name is what gets cut.
-    void DrawPeer(tsl::gfx::Renderer *r, const TsnxCtlPeer &p, s32 x, s32 y, s32 w, u32 size) {
-        char path[48];
+    // How a peer is reached: "Direct 4 ms", "Relayed via London".
+    void PeerPath(const TsnxCtlPeer &p, char *out, size_t cap) {
         const char *via = RegionName(p.relay_region);
-        if (p.direct) std::snprintf(path, sizeof path, "Direct");
-        else if (via) std::snprintf(path, sizeof path, "Relayed via %s", via);
-        else std::snprintf(path, sizeof path, "Relayed");
-        const s32 used = static_cast<s32>(r->drawString(path, false, x, y, size, r->a(p.direct ? Green : Yellow)).first) + 10;
+        if (p.direct && p.latency_ms) std::snprintf(out, cap, "Direct %u ms", p.latency_ms);
+        else if (p.direct) std::snprintf(out, cap, "Direct");
+        else if (via) std::snprintf(out, cap, "Relayed via %s", via);
+        else std::snprintf(out, cap, "Relayed");
+    }
+
+    // The path, in its colour, then the name (at x + name_x if given): the
+    // path comes first, so a long name is what gets cut.
+    void DrawPeer(tsl::gfx::Renderer *r, const TsnxCtlPeer &p, s32 x, s32 y, s32 w, u32 size, s32 name_x = 0) {
+        char path[48];
+        PeerPath(p, path, sizeof path);
+        const s32 drawn = static_cast<s32>(r->drawString(path, false, x, y, size, r->a(p.direct ? Green : Yellow)).first) + 10;
+        const s32 used = std::max(drawn, name_x);
         char name[sizeof p.name + 4];
         Fit(r, p.name, size, w - used, name, sizeof name);
         if (name[0] && std::strcmp(name, "...") != 0) r->drawString(name, false, x + used, y, size, r->a(White));  // see DrawMessage
@@ -653,11 +667,15 @@ namespace {
             std::snprintf(line, sizeof line, "%u peers%s%s", g_status.peers, relay, (g_status.flags & TSNX_CTL_FLAG_DIRECT) ? ", direct" : "");
         }
         r->drawString(line, false, x + 20, y + 102, 17, r->a(Grey));
-        // The two peers used most recently, and whether each is direct or
-        // relayed (slower). Connections lists them all.
+        // The two peers used most recently (in name order, so they don't
+        // swap places), and whether each is direct or relayed (slower).
+        // Connections lists them all.
         if (g_status.state == TSNX_CTL_CONNECTED) {
-            for (u32 i = 0; i < std::min<u32>(g_peer_count, 2); i++) {
-                if (g_peers[i].name[0]) DrawPeer(r, g_peers[i], x + 20, y + 125 + static_cast<s32>(i) * 21, w - 40, 15);
+            const u32 n = std::min<u32>(g_peers_shown, 2);
+            const bool swap = n == 2 && std::strcmp(g_peers[1].name, g_peers[0].name) < 0;
+            for (u32 i = 0; i < n; i++) {
+                const TsnxCtlPeer &p = g_peers[swap ? 1 - i : i];
+                if (p.name[0]) DrawPeer(r, p, x + 20, y + 125 + static_cast<s32>(i) * 21, w - 40, 15);
             }
         }
         if (g_last_error[0] && g_status.state != TSNX_CTL_CONNECTED && g_status.state != TSNX_CTL_PAUSED) {
@@ -720,34 +738,6 @@ namespace {
         r->drawString("in Sysmodules.", false, x + 20, y + 69, 15, r->a(Grey));
     }
 
-    // The Connections page: every peer in use and how it's reached.
-    void DrawPeers(tsl::gfx::Renderer *r, s32 x, s32 y, s32 w, s32 h) {
-        if (!g_status_ok || g_status.state != TSNX_CTL_CONNECTED) {
-            r->drawString("Not connected.", false, x + 20, y + 30, 17, r->a(Grey));
-            return;
-        }
-        if (g_status.version < 3) {
-            r->drawString("This tailscale-nx is too old to list them.", false, x + 20, y + 30, 17, r->a(Grey));
-            r->drawString("Update it to see its connections.", false, x + 20, y + 55, 17, r->a(Grey));
-            return;
-        }
-        r->drawString("Devices used in the last 45 seconds. Direct is", false, x + 20, y + 25, 15, r->a(Grey));
-        r->drawString("fastest; relayed goes through Tailscale's servers.", false, x + 20, y + 47, 15, r->a(Grey));
-        if (g_peer_count == 0) {
-            r->drawString("None right now.", false, x + 20, y + 90, 17, r->a(White));
-            return;
-        }
-        const u32 shown = std::min<u32>(g_peer_count, TSNX_CTL_MAX_PEERS);
-        for (u32 i = 0; i < shown; i++) {
-            if (g_peers[i].name[0]) DrawPeer(r, g_peers[i], x + 20, y + 85 + static_cast<s32>(i) * 26, w - 40, 17);
-        }
-        if (g_peer_count > shown) {
-            char more[32];
-            std::snprintf(more, sizeof more, "and %u more", g_peer_count - shown);
-            r->drawString(more, false, x + 20, y + 85 + static_cast<s32>(shown) * 26, 15, r->a(Grey));
-        }
-    }
-
     // ---- settings -------------------------------------------------------------
 
     // Switches the sysmodule reads as marker files: present = off.
@@ -777,13 +767,141 @@ namespace {
 
     // ---- GUI ----------------------------------------------------------------
 
+    // The Connections page: every peer in use, a row each, in name order.
+    // One element that scrolls itself: Tesla's lists scroll by moving focus
+    // between items, and items can't safely come and go while one has it,
+    // but peers come and go all the time.
+    class PeerTable : public tsl::elm::Element {
+        public:
+            void draw(tsl::gfx::Renderer *r) override {
+                const s32 x = getX(), y = getY(), w = getWidth(), h = getHeight();
+                if (!g_status_ok || g_status.state != TSNX_CTL_CONNECTED) {
+                    r->drawString("Not connected.", false, x + 20, y + 30, 17, r->a(Grey));
+                    return;
+                }
+                if (g_status.version < 3) {
+                    r->drawString("This tailscale-nx is too old to list them.", false, x + 20, y + 30, 17, r->a(Grey));
+                    r->drawString("Update it to see its connections.", false, x + 20, y + 55, 17, r->a(Grey));
+                    return;
+                }
+                if (g_peer_count > g_peers_shown) {
+                    char line[64];
+                    std::snprintf(line, sizeof line, "%u in use; the %u used last are listed.", g_peer_count, g_peers_shown);
+                    r->drawString(line, false, x + 20, y + 25, 15, r->a(Grey));
+                } else {
+                    r->drawString("Devices used in the last 45 seconds.", false, x + 20, y + 25, 15, r->a(Grey));
+                }
+                r->drawString("Direct is fastest; relayed goes through Tailscale.", false, x + 20, y + 47, 15, r->a(Grey));
+                const u32 n = g_peers_shown;
+                if (n == 0) {
+                    r->drawString("None right now.", false, x + 20, y + 95, 17, r->a(White));
+                    return;
+                }
+                Follow(n);
+                // Names start in one column, after the widest path.
+                s32 name_x = 0;
+                for (u32 i = 0; i < n; i++) {
+                    char path[48];
+                    PeerPath(g_peers[g_by_name[i]], path, sizeof path);
+                    name_x = std::max(name_x, TextWidth(r, path, 17) + 12);
+                }
+                const s32 top = y + RowsTop, visible = Visible(h);
+                for (u32 row = m_top; row < n && row < m_top + static_cast<u32>(visible); row++) {
+                    const TsnxCtlPeer &p = g_peers[g_by_name[row]];
+                    const s32 ry = top + static_cast<s32>(row - m_top) * RowHeight;
+                    if (row == m_sel) {
+                        r->drawRect(x + 6, ry, w - 12, RowHeight, r->a(Selected));  // a 2-pixel border
+                        r->drawRect(x + 8, ry + 2, w - 16, RowHeight - 4, r->a(Black));
+                    }
+                    if (!p.name[0]) continue;
+                    if (row == m_sel && TextWidth(r, p.name, 17) > w - 40 - name_x) {
+                        DrawPeer(r, p, x + 20, ry + 22, name_x, 17, name_x);  // no room left: the path only
+                        Marquee(r, p.name, x + 20 + name_x, ry, w - 40 - name_x);
+                    } else {
+                        DrawPeer(r, p, x + 20, ry + 22, w - 40, 17, name_x);
+                    }
+                }
+                // Where the rows on screen are in the whole list.
+                if (n > static_cast<u32>(visible)) {
+                    const s32 track = visible * RowHeight;
+                    const s32 bar = std::max<s32>(track * visible / static_cast<s32>(n), 20);
+                    const s32 at = (track - bar) * static_cast<s32>(m_top) / static_cast<s32>(n - visible);
+                    r->drawRect(x + w + 10, top + at, 5, bar, r->a(tsl::style::color::ColorHandle));
+                }
+            }
+
+            void layout(u16, u16, u16, u16) override {}
+
+            tsl::elm::Element *requestFocus(tsl::elm::Element *, tsl::FocusDirection) override { return this; }
+
+            void drawHighlight(tsl::gfx::Renderer *) override {}  // the selected row shows instead
+
+            // Up and down move the selection (repeating while held, as in
+            // Tesla's lists); B goes back.
+            bool handleInput(u64, u64 held, const HidTouchState &, HidAnalogStickState, HidAnalogStickState) override {
+                const bool up = held & HidNpadButton_AnyUp, down = held & HidNpadButton_AnyDown;
+                if (up == down) {
+                    m_repeat = 0;
+                    return false;
+                }
+                if (m_repeat == 0 || (m_repeat > 20 && m_repeat % 4 == 0)) Select(static_cast<s32>(m_sel) + (up ? -1 : 1));
+                m_repeat++;
+                return true;
+            }
+
+        private:
+            static constexpr s32 RowsTop = 66, RowHeight = 30;
+            static constexpr tsl::Color Selected{0x0, 0xC, 0xF, 0xF};
+
+            static s32 Visible(s32 h) { return std::max<s32>((h - RowsTop) / RowHeight, 1); }
+
+            void Select(s32 row) {
+                const s32 n = static_cast<s32>(g_peers_shown);
+                if (n == 0) return;
+                m_sel = static_cast<u32>(std::clamp(row, 0, n - 1));
+                std::snprintf(m_sel_name, sizeof m_sel_name, "%s", g_peers[g_by_name[m_sel]].name);
+                m_scroll = 0;
+                m_wait = 0;
+            }
+
+            // Keeps the selection on the same peer as others come and go, and
+            // in view.
+            void Follow(u32 n) {
+                u32 found = n;
+                for (u32 i = 0; i < n && m_sel_name[0]; i++) {
+                    if (std::strcmp(g_peers[g_by_name[i]].name, m_sel_name) == 0) found = i;
+                }
+                if (found < n) m_sel = found;
+                else Select(static_cast<s32>(std::min(m_sel, n - 1)));
+                const u32 visible = static_cast<u32>(Visible(getHeight()));
+                if (m_sel < m_top) m_top = m_sel;
+                if (m_sel >= m_top + visible) m_top = m_sel - visible + 1;
+                m_top = std::min(m_top, n > visible ? n - visible : 0);
+            }
+
+            // A name too long for its row, scrolling by (like Tesla's list
+            // items): still for a second and a half, then a pixel a frame.
+            void Marquee(tsl::gfx::Renderer *r, const char *name, s32 x, s32 ry, s32 w) {
+                const s32 loop = TextWidth(r, name, 17) + 40;
+                if (m_wait < 90) m_wait++;
+                else if (++m_scroll >= loop) m_scroll = m_wait = 0;
+                r->enableScissoring(x, ry, w, RowHeight);
+                r->drawString(name, false, x - m_scroll, ry + 22, 17, r->a(White));
+                r->drawString(name, false, x - m_scroll + loop, ry + 22, 17, r->a(White));
+                r->disableScissoring();
+            }
+
+            u32 m_sel = 0, m_top = 0;
+            char m_sel_name[sizeof(TsnxCtlPeer::name)] = {};
+            s32 m_scroll = 0, m_wait = 0;
+            u32 m_repeat = 0;
+    };
+
     class PeersGui : public tsl::Gui {
         public:
             tsl::elm::Element *createUI() override {
                 auto *frame = new tsl::elm::OverlayFrame("Tailscale", "Connections");
-                auto *list = new tsl::elm::List();
-                list->addItem(new Drawer(DrawPeers), 515);
-                frame->setContent(list);
+                frame->setContent(new PeerTable());
                 return frame;
             }
 

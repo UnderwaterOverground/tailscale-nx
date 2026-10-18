@@ -353,6 +353,7 @@ namespace ams::status {
             std::memcpy(p.name, peers[i].name, sizeof p.name);
             p.name[sizeof p.name - 1] = 0;
             p.direct = peers[i].direct;
+            p.latency_ms = peers[i].latency_ms;
             p.relay_region = peers[i].relay_region;
             direct |= p.direct != 0;
         }

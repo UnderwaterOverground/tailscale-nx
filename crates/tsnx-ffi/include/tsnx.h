@@ -166,7 +166,8 @@ size_t tsnx_engine_hosts(TsnxEngine *e, char *buf, size_t cap);
 typedef struct {
     char name[32];          // first label of its name, NUL-terminated
     uint8_t direct;         // 1: confirmed direct path; 0: relayed (DERP)
-    uint8_t reserved[3];
+    uint8_t reserved;
+    uint16_t latency_ms;    // when direct: its round trip (0 if unknown)
     uint32_t relay_region;  // when relayed: the DERP region (0 if unknown)
 } TsnxActivePeer;
 size_t tsnx_engine_active_peers(TsnxEngine *e, TsnxActivePeer *out, size_t max);

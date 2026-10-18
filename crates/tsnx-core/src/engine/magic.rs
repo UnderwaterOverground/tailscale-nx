@@ -86,7 +86,7 @@ impl PathState {
 
     #[cfg(test)]
     pub(super) fn for_test(last_active: Option<Instant>, direct: Option<(SocketAddr, Instant)>) -> Self {
-        let best = direct.map(|(addr, confirmed)| BestAddr { addr, latency: Duration::ZERO, confirmed });
+        let best = direct.map(|(addr, confirmed)| BestAddr { addr, latency: Duration::from_millis(4), confirmed });
         PathState { last_active, best, ..Default::default() }
     }
 }
@@ -99,6 +99,9 @@ pub struct ActivePeer<'a> {
     /// None: a confirmed direct path. Some(region): relayed through that
     /// DERP region (0 if no region is known yet).
     pub relay: Option<u32>,
+    /// A direct path's round trip, from its last pong (none when relayed:
+    /// we don't ping through DERP).
+    pub latency: Option<Duration>,
 }
 
 pub(super) struct MagicState {
@@ -153,11 +156,12 @@ impl Engine {
             .values()
             .filter(|p| p.path.active(now))
             .filter_map(|p| {
-                let relay = match p.path.trusted(now) {
-                    Some(_) => None,
-                    None => Some(p.home_derp.or(self.home_derp).unwrap_or(0)),
+                let (relay, latency) = match p.path.trusted(now) {
+                    Some(_) => (None, p.path.best.map(|b| b.latency)),
+                    None => (Some(p.home_derp.or(self.home_derp).unwrap_or(0)), None),
                 };
-                Some((p.path.last_active?, ActivePeer { name: p.name.split('.').next().unwrap_or_default(), relay }))
+                let name = p.name.split('.').next().unwrap_or_default();
+                Some((p.path.last_active?, ActivePeer { name, relay, latency }))
             })
             .collect();
         peers.sort_by(|a, b| b.0.cmp(&a.0));

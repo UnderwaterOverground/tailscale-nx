@@ -1126,9 +1126,9 @@ mod tests {
         assert_eq!(
             e.active_peers(),
             [
-                ActivePeer { name: "laptop", relay: Some(8) },
-                ActivePeer { name: "gaming-pc", relay: None },
-                ActivePeer { name: "phone", relay: Some(HOME) },
+                ActivePeer { name: "laptop", relay: Some(8), latency: None },
+                ActivePeer { name: "gaming-pc", relay: None, latency: Some(Duration::from_millis(4)) },
+                ActivePeer { name: "phone", relay: Some(HOME), latency: None },
             ]
         );
     }

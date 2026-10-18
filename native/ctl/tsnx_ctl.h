@@ -20,7 +20,7 @@
 
 #define TSNX_CTL_SERVICE "tsnx:ctl"
 #define TSNX_CTL_VERSION 3
-#define TSNX_CTL_MAX_PEERS 16
+#define TSNX_CTL_MAX_PEERS 32
 
 enum {
     TSNX_CTL_STARTING = 0,     // waiting for the network / starting up
@@ -65,7 +65,8 @@ typedef struct {
 typedef struct {
     char name[32];          // first label of its name, NUL-terminated
     uint8_t direct;         // 1: a confirmed direct path; 0: relayed (DERP)
-    uint8_t reserved[3];
+    uint8_t reserved;
+    uint16_t latency_ms;    // when direct: its round trip (0: unknown)
     uint32_t relay_region;  // when relayed: the DERP region id (0: unknown)
 } TsnxCtlPeer;
 
