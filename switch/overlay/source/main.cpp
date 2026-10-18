@@ -43,7 +43,7 @@ namespace {
             char login_url[256] = {};
             char last_error[192] = {};
             TsnxCtlPeer peers[TSNX_CTL_MAX_PEERS] = {};
-            u32 peer_count = 0;
+            u32 peer_count = 0;  // active, which can be more than fit in peers
         };
 
         Thread g_thread;
@@ -105,7 +105,7 @@ namespace {
                     return serviceDispatchOut(&g_session, 5, n, .buffer_attrs = {SfBufferAttr_HipcMapAlias | SfBufferAttr_Out},
                                               .buffers = {{s.peers, sizeof s.peers}});
                 });
-                s.peer_count = R_SUCCEEDED(rc) ? std::min<u32>(n, TSNX_CTL_MAX_PEERS) : 0;
+                s.peer_count = R_SUCCEEDED(rc) ? n : 0;
             }
             s.have = g_open;
             s.valid = true;
@@ -419,7 +419,7 @@ namespace {
     char g_login_url[256] = {};
     char g_last_error[192] = {};
     TsnxCtlPeer g_peers[TSNX_CTL_MAX_PEERS] = {};
-    u32 g_peer_count = 0;
+    u32 g_peer_count = 0;  // active; the first (up to TSNX_CTL_MAX_PEERS) are in g_peers
 
     // The login link as a QR code (encoded once per link).
     uint8_t g_qr[qrcodegen_BUFFER_LEN_MAX];
@@ -465,6 +465,32 @@ namespace {
 
     // ---- drawing ------------------------------------------------------------
 
+    // Tesla's CustomDrawer, kept inside its list: Tesla's sets the clip to
+    // the drawer's own bounds, replacing the list's, so a drawer partly
+    // scrolled out of the list drew over the header or the footer.
+    class Drawer : public tsl::elm::Element {
+        public:
+            using Func = void (*)(tsl::gfx::Renderer *, s32 x, s32 y, s32 w, s32 h);
+            explicit Drawer(Func f) : m_func(f) {}
+
+            void draw(tsl::gfx::Renderer *r) override {
+                s32 top = getTopBound(), bottom = getBottomBound();
+                if (Element *list = getParent()) {
+                    top = std::max(top, list->getTopBound());
+                    bottom = std::min(bottom, list->getBottomBound());
+                }
+                if (bottom <= top) return;
+                r->enableScissoring(getX(), top, getWidth(), bottom - top);
+                m_func(r, ELEMENT_BOUNDS(this));
+                r->disableScissoring();
+            }
+
+            void layout(u16, u16, u16, u16) override {}
+
+        private:
+            Func m_func;
+    };
+
     constexpr tsl::Color White{0xF, 0xF, 0xF, 0xF};
     constexpr tsl::Color Black{0x0, 0x0, 0x0, 0xF};
     constexpr tsl::Color Grey{0xA, 0xA, 0xA, 0xF};
@@ -491,6 +517,32 @@ namespace {
         }
         if (first[0]) r->drawString(first, false, x, y, size, r->a(c));  // see DrawMessage
         if (second[0]) r->drawString(second, false, x, y + size + 3, size, r->a(c));
+    }
+
+    s32 TextWidth(tsl::gfx::Renderer *r, const char *text, u32 size) {
+        return static_cast<s32>(r->drawString(text, false, 0, 0, size, tsl::style::color::ColorTransparent).first);
+    }
+
+    // `text` into `out`, cut short with "..." to fit `w` pixels.
+    void Fit(tsl::gfx::Renderer *r, const char *text, u32 size, s32 w, char *out, size_t cap) {
+        std::snprintf(out, cap, "%s", text);
+        for (size_t n = std::strlen(out); n > 0 && TextWidth(r, out, size) > w; n--) {
+            std::snprintf(out, cap, "%.*s...", static_cast<int>(n - 1), text);
+        }
+    }
+
+    // How a peer is reached, in its colour, then its name: the path comes
+    // first, so a long name is what gets cut.
+    void DrawPeer(tsl::gfx::Renderer *r, const TsnxCtlPeer &p, s32 x, s32 y, s32 w, u32 size) {
+        char path[48];
+        const char *via = RegionName(p.relay_region);
+        if (p.direct) std::snprintf(path, sizeof path, "Direct");
+        else if (via) std::snprintf(path, sizeof path, "Relayed via %s", via);
+        else std::snprintf(path, sizeof path, "Relayed");
+        const s32 used = static_cast<s32>(r->drawString(path, false, x, y, size, r->a(p.direct ? Green : Yellow)).first) + 10;
+        char name[sizeof p.name + 4];
+        Fit(r, p.name, size, w - used, name, sizeof name);
+        if (name[0] && std::strcmp(name, "...") != 0) r->drawString(name, false, x + used, y, size, r->a(White));  // see DrawMessage
     }
 
     // No internet connection (not while paused or stopping: then it's moot).
@@ -601,20 +653,11 @@ namespace {
             std::snprintf(line, sizeof line, "%u peers%s%s", g_status.peers, relay, (g_status.flags & TSNX_CTL_FLAG_DIRECT) ? ", direct" : "");
         }
         r->drawString(line, false, x + 20, y + 102, 17, r->a(Grey));
-        // The peers in use, and whether each is relayed (slower) or direct.
+        // The two peers used most recently, and whether each is direct or
+        // relayed (slower). Connections lists them all.
         if (g_status.state == TSNX_CTL_CONNECTED) {
             for (u32 i = 0; i < std::min<u32>(g_peer_count, 2); i++) {
-                const TsnxCtlPeer &p = g_peers[i];
-                if (!p.name[0]) continue;
-                // Long names are shortened so the path always shows.
-                char name[24];
-                if (std::strlen(p.name) > 18) std::snprintf(name, sizeof name, "%.17s...", p.name);
-                else std::snprintf(name, sizeof name, "%s", p.name);
-                const char *via = RegionName(p.relay_region);
-                if (p.direct) std::snprintf(line, sizeof line, "%s: direct", name);
-                else if (via) std::snprintf(line, sizeof line, "%s: relayed via %s", name, via);
-                else std::snprintf(line, sizeof line, "%s: relayed", name);
-                r->drawString(line, false, x + 20, y + 125 + static_cast<s32>(i) * 21, 15, r->a(p.direct ? Green : Yellow), w - 40);
+                if (g_peers[i].name[0]) DrawPeer(r, g_peers[i], x + 20, y + 125 + static_cast<s32>(i) * 21, w - 40, 15);
             }
         }
         if (g_last_error[0] && g_status.state != TSNX_CTL_CONNECTED && g_status.state != TSNX_CTL_PAUSED) {
@@ -677,6 +720,34 @@ namespace {
         r->drawString("in Sysmodules.", false, x + 20, y + 69, 15, r->a(Grey));
     }
 
+    // The Connections page: every peer in use and how it's reached.
+    void DrawPeers(tsl::gfx::Renderer *r, s32 x, s32 y, s32 w, s32 h) {
+        if (!g_status_ok || g_status.state != TSNX_CTL_CONNECTED) {
+            r->drawString("Not connected.", false, x + 20, y + 30, 17, r->a(Grey));
+            return;
+        }
+        if (g_status.version < 3) {
+            r->drawString("This tailscale-nx is too old to list them.", false, x + 20, y + 30, 17, r->a(Grey));
+            r->drawString("Update it to see its connections.", false, x + 20, y + 55, 17, r->a(Grey));
+            return;
+        }
+        r->drawString("Devices used in the last 45 seconds. Direct is", false, x + 20, y + 25, 15, r->a(Grey));
+        r->drawString("fastest; relayed goes through Tailscale's servers.", false, x + 20, y + 47, 15, r->a(Grey));
+        if (g_peer_count == 0) {
+            r->drawString("None right now.", false, x + 20, y + 90, 17, r->a(White));
+            return;
+        }
+        const u32 shown = std::min<u32>(g_peer_count, TSNX_CTL_MAX_PEERS);
+        for (u32 i = 0; i < shown; i++) {
+            if (g_peers[i].name[0]) DrawPeer(r, g_peers[i], x + 20, y + 85 + static_cast<s32>(i) * 26, w - 40, 17);
+        }
+        if (g_peer_count > shown) {
+            char more[32];
+            std::snprintf(more, sizeof more, "and %u more", g_peer_count - shown);
+            r->drawString(more, false, x + 20, y + 85 + static_cast<s32>(shown) * 26, 15, r->a(Grey));
+        }
+    }
+
     // ---- settings -------------------------------------------------------------
 
     // Switches the sysmodule reads as marker files: present = off.
@@ -706,13 +777,33 @@ namespace {
 
     // ---- GUI ----------------------------------------------------------------
 
+    class PeersGui : public tsl::Gui {
+        public:
+            tsl::elm::Element *createUI() override {
+                auto *frame = new tsl::elm::OverlayFrame("Tailscale", "Connections");
+                auto *list = new tsl::elm::List();
+                list->addItem(new Drawer(DrawPeers), 515);
+                frame->setContent(list);
+                return frame;
+            }
+
+            void update() override {
+                if (++m_frames % 30 != 0) return;
+                Poll();
+                Refresh();
+            }
+
+        private:
+            u32 m_frames = 0;
+    };
+
     class MainGui : public tsl::Gui {
         public:
             tsl::elm::Element *createUI() override {
                 Refresh();
                 auto *frame = new tsl::elm::OverlayFrame("Tailscale", "tailscale-nx " APP_VERSION);
                 auto *list = new tsl::elm::List();
-                list->addItem(new tsl::elm::CustomDrawer(DrawStatus), 165);
+                list->addItem(new Drawer(DrawStatus), 165);
                 if (!g_status_ok) ReadWhyNotRunning();
 
                 m_toggle = new tsl::elm::ToggleListItem("Tailscale", !(g_status_ok && g_status.state == TSNX_CTL_PAUSED));
@@ -721,6 +812,15 @@ namespace {
                     Refresh();
                 });
                 list->addItem(m_toggle);
+
+                // Every peer in use, and how it's reached.
+                m_peers = new tsl::elm::ListItem("Connections", PeersValue());
+                m_peers->setClickListener([](u64 keys) {
+                    if (!(keys & HidNpadButton_A)) return false;
+                    tsl::changeTo<PeersGui>();
+                    return true;
+                });
+                list->addItem(m_peers);
 
                 // Stop or start the sysmodule itself (not its boot setting).
                 m_power = new tsl::elm::ListItem(PowerLabel());
@@ -735,7 +835,7 @@ namespace {
                     return true;
                 });
                 list->addItem(m_power);
-                list->addItem(new tsl::elm::CustomDrawer(DrawMessage), 50);
+                list->addItem(new Drawer(DrawMessage), 50);
 
                 // The sysmodule's "Connected. IP: ..." toast at boot; off is
                 // a marker file it checks when it connects.
@@ -749,8 +849,8 @@ namespace {
                 updates->setStateChangedListener([](bool on) { SetMarker(NoUpdateCheckPath, !on); });
                 list->addItem(updates);
 
-                list->addItem(new tsl::elm::CustomDrawer(DrawLogin), 330);
-                list->addItem(new tsl::elm::CustomDrawer(DrawTip), 85);
+                list->addItem(new Drawer(DrawLogin), 330);
+                list->addItem(new Drawer(DrawTip), 85);
                 frame->setContent(list);
                 return frame;
             }
@@ -762,6 +862,13 @@ namespace {
                 Refresh();
                 const bool on = !(g_status_ok && g_status.state == TSNX_CTL_PAUSED);
                 if (m_toggle && !ctl::g_pause_pending && m_toggle->getState() != on) m_toggle->setState(on);
+                if (m_peers) {
+                    const std::string value = PeersValue();
+                    if (value != m_peers_value) {
+                        m_peers->setValue(value);
+                        m_peers_value = value;
+                    }
+                }
                 if (m_power) {
                     const char *label = PowerLabel();
                     if (label != m_power_label) {
@@ -773,6 +880,11 @@ namespace {
 
         private:
             enum class Action { None, Stop, Start, TurnBackOn };
+
+            static std::string PeersValue() {
+                if (!g_status_ok || g_status.state != TSNX_CTL_CONNECTED || g_status.version < 3) return "";
+                return g_peer_count ? std::to_string(g_peer_count) + " active" : "None";
+            }
 
             static Action PowerAction() {
                 if (g_phase != Phase::Idle) return Action::None;
@@ -793,6 +905,8 @@ namespace {
             }
 
             tsl::elm::ToggleListItem *m_toggle = nullptr;
+            tsl::elm::ListItem *m_peers = nullptr;
+            std::string m_peers_value;
             tsl::elm::ListItem *m_power = nullptr;
             const char *m_power_label = nullptr;
             u32 m_frames = 0;

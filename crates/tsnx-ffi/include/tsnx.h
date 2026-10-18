@@ -162,7 +162,7 @@ uint32_t tsnx_net_readiness(TsnxEngine *e, int32_t id);
 // trailing dot), NUL-terminated and truncated to cap. Returns the full length.
 size_t tsnx_engine_hosts(TsnxEngine *e, char *buf, size_t cap);
 // Peers we sent to in the last 45 s, most recent first: up to max of them
-// into out. Returns how many were written.
+// into out. Returns how many there are (can be more than max).
 typedef struct {
     char name[32];          // first label of its name, NUL-terminated
     uint8_t direct;         // 1: confirmed direct path; 0: relayed (DERP)

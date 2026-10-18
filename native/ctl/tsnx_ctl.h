@@ -11,14 +11,16 @@
 //          the process exits shortly after replying: close the session
 //          and wait for it to be gone before starting it again.
 //   cmd 5  GetActivePeers(out buffer)  -> u32 count (version 3+). Fills the
-//          buffer with up to TSNX_CTL_MAX_PEERS TsnxCtlPeer: the peers sent
-//          to in the last 45 s, most recent first, and how each is reached.
+//          buffer with up to TSNX_CTL_MAX_PEERS TsnxCtlPeer (fewer if it's
+//          smaller): the peers sent to in the last 45 s, most recent first,
+//          and how each is reached. The count is how many are active, which
+//          can be more than were written.
 #pragma once
 #include <stdint.h>
 
 #define TSNX_CTL_SERVICE "tsnx:ctl"
 #define TSNX_CTL_VERSION 3
-#define TSNX_CTL_MAX_PEERS 4
+#define TSNX_CTL_MAX_PEERS 16
 
 enum {
     TSNX_CTL_STARTING = 0,     // waiting for the network / starting up

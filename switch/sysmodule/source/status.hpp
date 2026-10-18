@@ -34,12 +34,14 @@ namespace ams::status {
 
     // Engine events (engine thread, runtime lock held).
     void OnEvent(const TsnxEvent &ev);
-    // The engine's recently used peers (engine thread, every round).
+    // The engine's recently used peers (engine thread, every round): n is
+    // how many are active, of which up to TSNX_CTL_MAX_PEERS are in peers.
     void SetActivePeers(const TsnxActivePeer *peers, size_t n);
 
     TsnxCtlStatus Get();
     size_t GetLoginUrl(char *out, size_t cap);
     size_t GetLastError(char *out, size_t cap);
+    // Up to max of them into out; returns how many are active.
     size_t GetActivePeers(TsnxCtlPeer *out, size_t max);
 
     // A Taildrop transfer ended: a short toast either way.

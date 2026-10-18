@@ -474,7 +474,7 @@ pub unsafe extern "C" fn tsnx_engine_active_peers(e: *mut TsnxEngine, out: *mut 
         o._reserved = [0; 3];
         o.relay_region = p.relay.unwrap_or(0);
     }
-    n
+    peers.len()
 }
 
 #[no_mangle]

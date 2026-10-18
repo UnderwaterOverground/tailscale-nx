@@ -32,7 +32,8 @@ namespace ams::status {
         constinit char g_login_url[256] = {};
         constinit char g_last_error[192] = {};
         constinit TsnxCtlPeer g_peers[TSNX_CTL_MAX_PEERS] = {};
-        constinit size_t g_peer_count = 0;
+        constinit size_t g_peer_count = 0;  // in g_peers
+        constinit size_t g_peer_total = 0;  // active, including any that didn't fit
         constinit std::atomic<bool> g_paused = false;
         constinit bool g_connect_notice = true;   // config.ini connect_notice
         constinit bool g_announced_connected = false;  // once per boot
@@ -343,6 +344,7 @@ namespace ams::status {
 
     void SetActivePeers(const TsnxActivePeer *peers, size_t n) {
         std::scoped_lock lk(g_mutex);
+        g_peer_total = n;
         g_peer_count = std::min(n, static_cast<size_t>(TSNX_CTL_MAX_PEERS));
         bool direct = false;
         for (size_t i = 0; i < g_peer_count; i++) {
@@ -360,9 +362,8 @@ namespace ams::status {
 
     size_t GetActivePeers(TsnxCtlPeer *out, size_t max) {
         std::scoped_lock lk(g_mutex);
-        const size_t n = std::min(g_peer_count, max);
-        std::memcpy(out, g_peers, n * sizeof *out);
-        return n;
+        std::memcpy(out, g_peers, std::min(g_peer_count, max) * sizeof *out);
+        return g_peer_total;
     }
 
     bool IsPaused() {
