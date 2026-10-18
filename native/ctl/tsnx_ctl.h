@@ -10,11 +10,15 @@
 //          console or an app; the reply says why not. On TSNX_CTL_STOP_OK
 //          the process exits shortly after replying: close the session
 //          and wait for it to be gone before starting it again.
+//   cmd 5  GetActivePeers(out buffer)  -> u32 count (version 3+). Fills the
+//          buffer with up to TSNX_CTL_MAX_PEERS TsnxCtlPeer: the peers sent
+//          to in the last 45 s, most recent first, and how each is reached.
 #pragma once
 #include <stdint.h>
 
 #define TSNX_CTL_SERVICE "tsnx:ctl"
-#define TSNX_CTL_VERSION 2
+#define TSNX_CTL_VERSION 3
+#define TSNX_CTL_MAX_PEERS 4
 
 enum {
     TSNX_CTL_STARTING = 0,     // waiting for the network / starting up
@@ -36,7 +40,7 @@ enum {
 enum {
     TSNX_CTL_FLAG_MITM = 1,      // homebrew sockets reach the tailnet
     TSNX_CTL_FLAG_MAGICDNS = 2,  // tailnet names in Atmosphere's hosts file
-    TSNX_CTL_FLAG_DIRECT = 4,    // at least one peer reached directly (not relayed)
+    TSNX_CTL_FLAG_DIRECT = 4,    // an active peer is reached directly (before version 3: any peer, ever)
     TSNX_CTL_FLAG_OFFLINE = 8,   // the console has no internet connection
 };
 
@@ -56,6 +60,14 @@ typedef struct {
     uint32_t reserved[7];
 } TsnxCtlStatus;
 
+typedef struct {
+    char name[32];          // first label of its name, NUL-terminated
+    uint8_t direct;         // 1: a confirmed direct path; 0: relayed (DERP)
+    uint8_t reserved[3];
+    uint32_t relay_region;  // when relayed: the DERP region id (0: unknown)
+} TsnxCtlPeer;
+
 #ifdef __cplusplus
 static_assert(sizeof(TsnxCtlStatus) == 64, "TsnxCtlStatus layout");
+static_assert(sizeof(TsnxCtlPeer) == 40, "TsnxCtlPeer layout");
 #endif

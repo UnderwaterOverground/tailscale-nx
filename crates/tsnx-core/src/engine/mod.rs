@@ -5,6 +5,7 @@
 
 mod filter;
 mod magic;
+pub use magic::ActivePeer;
 mod netmap;
 mod packet;
 pub mod taildrop;
@@ -1086,6 +1087,50 @@ mod tests {
     fn derp_connects(e: &mut Engine) -> usize {
         let io: Vec<Io> = core::iter::from_fn(|| e.poll_io()).collect();
         io.iter().filter(|io| matches!(io, Io::Connect { id, .. } if matches!(e.owners.get(id), Some(Owner::Derp(HOME))))).count()
+    }
+
+    fn add_peer(e: &mut Engine, id: i64, name: &str, home_derp: Option<u32>, path: magic::PathState) {
+        let peer = Peer {
+            name: name.into(),
+            key: NodePublicKey::from_bytes([id as u8; 32]),
+            disco: None,
+            prefixes: Vec::new(),
+            routes: Vec::new(),
+            home_derp,
+            endpoints: Vec::new(),
+            wg: PeerId(id as u32),
+            path,
+            user: 0,
+            tagged: false,
+        };
+        e.peers.insert(id, peer);
+    }
+
+    #[test]
+    fn active_peers_report_their_paths() {
+        let start = Instant::from_nanos(1_000_000_000);
+        let now = start + Duration::from_secs(100);
+        let mut e = engine(now);
+        let addr: SocketAddr = "192.168.1.100:41641".parse().unwrap();
+        let sent = |ago: u64| Some(now - Duration::from_secs(ago));
+        // Direct (pong 2 s ago), sent to 5 s ago.
+        add_peer(&mut e, 1, "gaming-pc.tail1234.ts.net.", Some(8), magic::PathState::for_test(sent(5), Some((addr, now - Duration::from_secs(2)))));
+        // Its direct path lapsed (pong 20 s ago): relayed through its home region.
+        add_peer(&mut e, 2, "laptop.tail1234.ts.net.", Some(8), magic::PathState::for_test(sent(1), Some((addr, now - Duration::from_secs(20)))));
+        // No region of its own: ours.
+        add_peer(&mut e, 3, "phone.tail1234.ts.net.", None, magic::PathState::for_test(sent(30), None));
+        // Idle for longer than SESSION_ACTIVE, or never used: not listed.
+        add_peer(&mut e, 4, "old.tail1234.ts.net.", Some(8), magic::PathState::for_test(sent(60), None));
+        add_peer(&mut e, 5, "unused.tail1234.ts.net.", Some(8), magic::PathState::default());
+
+        assert_eq!(
+            e.active_peers(),
+            [
+                ActivePeer { name: "laptop", relay: Some(8) },
+                ActivePeer { name: "gaming-pc", relay: None },
+                ActivePeer { name: "phone", relay: Some(HOME) },
+            ]
+        );
     }
 
     #[test]

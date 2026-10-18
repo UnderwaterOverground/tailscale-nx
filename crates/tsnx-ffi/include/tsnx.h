@@ -161,6 +161,15 @@ uint32_t tsnx_net_readiness(TsnxEngine *e, int32_t id);
 // Writes "a.b.c.d name\n" for this node and every peer (MagicDNS names, no
 // trailing dot), NUL-terminated and truncated to cap. Returns the full length.
 size_t tsnx_engine_hosts(TsnxEngine *e, char *buf, size_t cap);
+// Peers we sent to in the last 45 s, most recent first: up to max of them
+// into out. Returns how many were written.
+typedef struct {
+    char name[32];          // first label of its name, NUL-terminated
+    uint8_t direct;         // 1: confirmed direct path; 0: relayed (DERP)
+    uint8_t reserved[3];
+    uint32_t relay_region;  // when relayed: the DERP region (0 if unknown)
+} TsnxActivePeer;
+size_t tsnx_engine_active_peers(TsnxEngine *e, TsnxActivePeer *out, size_t max);
 // Our current private node key (32 bytes), for the state file.
 void tsnx_engine_node_key(TsnxEngine *e, uint8_t out[32]);
 // Bytes of overlay socket buffers in use (TCP buffers, queued datagrams).

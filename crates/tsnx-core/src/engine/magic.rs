@@ -83,6 +83,22 @@ impl PathState {
     fn active(&self, now: Instant) -> bool {
         self.last_active.is_some_and(|t| now.saturating_duration_since(t) < SESSION_ACTIVE)
     }
+
+    #[cfg(test)]
+    pub(super) fn for_test(last_active: Option<Instant>, direct: Option<(SocketAddr, Instant)>) -> Self {
+        let best = direct.map(|(addr, confirmed)| BestAddr { addr, latency: Duration::ZERO, confirmed });
+        PathState { last_active, best, ..Default::default() }
+    }
+}
+
+/// A peer we've sent to recently, and how that traffic travels.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ActivePeer<'a> {
+    /// The first label of its name ("gaming-pc", not the full MagicDNS name).
+    pub name: &'a str,
+    /// None: a confirmed direct path. Some(region): relayed through that
+    /// DERP region (0 if no region is known yet).
+    pub relay: Option<u32>,
 }
 
 pub(super) struct MagicState {
@@ -129,6 +145,25 @@ fn is_wg_data(wire: &[u8]) -> bool {
 }
 
 impl Engine {
+    /// Peers we've sent to in the last SESSION_ACTIVE, most recent first.
+    pub fn active_peers(&self) -> Vec<ActivePeer<'_>> {
+        let now = self.now;
+        let mut peers: Vec<(Instant, ActivePeer<'_>)> = self
+            .peers
+            .values()
+            .filter(|p| p.path.active(now))
+            .filter_map(|p| {
+                let relay = match p.path.trusted(now) {
+                    Some(_) => None,
+                    None => Some(p.home_derp.or(self.home_derp).unwrap_or(0)),
+                };
+                Some((p.path.last_active?, ActivePeer { name: p.name.split('.').next().unwrap_or_default(), relay }))
+            })
+            .collect();
+        peers.sort_by(|a, b| b.0.cmp(&a.0));
+        peers.into_iter().map(|(_, p)| p).collect()
+    }
+
     /// Sends WireGuard wire packets to a peer over the best known path.
     pub(super) fn transmit(&mut self, wg: PeerId, pkts: Vec<PacketMut>) {
         let Some(&node_id) = self.by_wg.get(&wg.0) else { return };

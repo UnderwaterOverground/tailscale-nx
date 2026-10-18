@@ -34,10 +34,13 @@ namespace ams::status {
 
     // Engine events (engine thread, runtime lock held).
     void OnEvent(const TsnxEvent &ev);
+    // The engine's recently used peers (engine thread, every round).
+    void SetActivePeers(const TsnxActivePeer *peers, size_t n);
 
     TsnxCtlStatus Get();
     size_t GetLoginUrl(char *out, size_t cap);
     size_t GetLastError(char *out, size_t cap);
+    size_t GetActivePeers(TsnxCtlPeer *out, size_t max);
 
     // A Taildrop transfer ended: a short toast either way.
     void AnnounceFile(bool saved, const char *name, u64 bytes, const char *from, const char *why);

@@ -31,6 +31,8 @@ namespace ams::status {
         constinit bool g_authorized = false;
         constinit char g_login_url[256] = {};
         constinit char g_last_error[192] = {};
+        constinit TsnxCtlPeer g_peers[TSNX_CTL_MAX_PEERS] = {};
+        constinit size_t g_peer_count = 0;
         constinit std::atomic<bool> g_paused = false;
         constinit bool g_connect_notice = true;   // config.ini connect_notice
         constinit bool g_announced_connected = false;  // once per boot
@@ -231,9 +233,6 @@ namespace ams::status {
                 if (ev.value) g_control_lost_ns = 0;
                 else if (g_control_lost_ns == 0) g_control_lost_ns = NowNs();
                 break;
-            case TSNX_EVENT_PEER_PATH:
-                if (ev.value) g_status.flags |= TSNX_CTL_FLAG_DIRECT;
-                break;
             case TSNX_EVENT_ERROR:
                 CopySafe(g_last_error, sizeof g_last_error, ev.text);
                 break;
@@ -340,6 +339,30 @@ namespace ams::status {
     size_t GetLastError(char *out, size_t cap) {
         std::scoped_lock lk(g_mutex);
         return static_cast<size_t>(util::SNPrintf(out, cap, "%s", g_last_error));
+    }
+
+    void SetActivePeers(const TsnxActivePeer *peers, size_t n) {
+        std::scoped_lock lk(g_mutex);
+        g_peer_count = std::min(n, static_cast<size_t>(TSNX_CTL_MAX_PEERS));
+        bool direct = false;
+        for (size_t i = 0; i < g_peer_count; i++) {
+            TsnxCtlPeer &p = g_peers[i];
+            p = {};
+            std::memcpy(p.name, peers[i].name, sizeof p.name);
+            p.name[sizeof p.name - 1] = 0;
+            p.direct = peers[i].direct;
+            p.relay_region = peers[i].relay_region;
+            direct |= p.direct != 0;
+        }
+        if (direct) g_status.flags |= TSNX_CTL_FLAG_DIRECT;
+        else g_status.flags &= ~static_cast<u32>(TSNX_CTL_FLAG_DIRECT);
+    }
+
+    size_t GetActivePeers(TsnxCtlPeer *out, size_t max) {
+        std::scoped_lock lk(g_mutex);
+        const size_t n = std::min(g_peer_count, max);
+        std::memcpy(out, g_peers, n * sizeof *out);
+        return n;
     }
 
     bool IsPaused() {

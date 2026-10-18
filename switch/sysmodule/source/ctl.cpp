@@ -11,7 +11,8 @@
     AMS_SF_METHOD_INFO(C, H, 1, Result, GetLoginUrl,  (const sf::OutBuffer &url, sf::Out<u32> out_len),       (url, out_len))          \
     AMS_SF_METHOD_INFO(C, H, 2, Result, SetPaused,    (bool paused),                                          (paused))                \
     AMS_SF_METHOD_INFO(C, H, 3, Result, GetLastError, (const sf::OutBuffer &msg, sf::Out<u32> out_len),       (msg, out_len))          \
-    AMS_SF_METHOD_INFO(C, H, 4, Result, Stop,         (sf::Out<u32> out_code, sf::Out<u32> out_detail),       (out_code, out_detail))
+    AMS_SF_METHOD_INFO(C, H, 4, Result, Stop,         (sf::Out<u32> out_code, sf::Out<u32> out_detail),       (out_code, out_detail))  \
+    AMS_SF_METHOD_INFO(C, H, 5, Result, GetActivePeers, (const sf::OutBuffer &peers, sf::Out<u32> out_count),   (peers, out_count))
 
 AMS_SF_DEFINE_INTERFACE(ams::ctl, ICtl, TSNX_CTL_INTERFACE_INFO, 0x7473636C)
 
@@ -51,6 +52,12 @@ namespace ams::ctl {
                 u32 detail = 0;
                 out_code.SetValue(g_stop ? g_stop(std::addressof(detail)) : static_cast<u32>(TSNX_CTL_STOP_BUSY));
                 out_detail.SetValue(detail);
+                R_SUCCEED();
+            }
+
+            Result GetActivePeers(const sf::OutBuffer &peers, sf::Out<u32> out_count) {
+                const size_t n = status::GetActivePeers(reinterpret_cast<::TsnxCtlPeer *>(peers.GetPointer()), peers.GetSize() / sizeof(::TsnxCtlPeer));
+                out_count.SetValue(static_cast<u32>(n));
                 R_SUCCEED();
             }
     };

@@ -1139,6 +1139,8 @@ namespace ams {
             }
             g_last_round_ns = now;
             status::EngineRan(now);
+            TsnxActivePeer active[TSNX_CTL_MAX_PEERS];
+            status::SetActivePeers(active, tsnx_engine_active_peers(engine, active, TSNX_CTL_MAX_PEERS));
             // Whole-heap use (Rust, C++, C), sampled every round; the Rust
             // peak below is exact.
             const size_t heap_free = init::GetAllocator()->GetTotalFreeSize();

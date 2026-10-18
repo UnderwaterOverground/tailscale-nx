@@ -42,6 +42,8 @@ namespace {
             TsnxCtlStatus status = {};
             char login_url[256] = {};
             char last_error[192] = {};
+            TsnxCtlPeer peers[TSNX_CTL_MAX_PEERS] = {};
+            u32 peer_count = 0;
         };
 
         Thread g_thread;
@@ -97,6 +99,14 @@ namespace {
             }
             if (s.status_ok && s.status.state == TSNX_CTL_NEEDS_LOGIN) GetString(1, s.login_url, sizeof s.login_url);
             if (s.status_ok) GetString(3, s.last_error, sizeof s.last_error);
+            if (s.status_ok && s.status.version >= 3 && s.status.state == TSNX_CTL_CONNECTED) {
+                u32 n = 0;
+                const Result rc = Call([&] {
+                    return serviceDispatchOut(&g_session, 5, n, .buffer_attrs = {SfBufferAttr_HipcMapAlias | SfBufferAttr_Out},
+                                              .buffers = {{s.peers, sizeof s.peers}});
+                });
+                s.peer_count = R_SUCCEEDED(rc) ? std::min<u32>(n, TSNX_CTL_MAX_PEERS) : 0;
+            }
             s.have = g_open;
             s.valid = true;
             mutexLock(&g_mutex);
@@ -408,6 +418,8 @@ namespace {
 
     char g_login_url[256] = {};
     char g_last_error[192] = {};
+    TsnxCtlPeer g_peers[TSNX_CTL_MAX_PEERS] = {};
+    u32 g_peer_count = 0;
 
     // The login link as a QR code (encoded once per link).
     uint8_t g_qr[qrcodegen_BUFFER_LEN_MAX];
@@ -429,6 +441,8 @@ namespace {
         g_have_ctl = s.have && g_phase != Phase::Exiting;
         g_status_ok = s.status_ok && g_have_ctl;
         g_status = s.status;
+        std::memcpy(g_peers, s.peers, sizeof g_peers);
+        g_peer_count = s.peer_count;
         std::snprintf(g_login_url, sizeof g_login_url, "%s", s.login_url);
         std::snprintf(g_last_error, sizeof g_last_error, "%s", s.last_error);
         if (std::strcmp(g_login_url, g_qr_for) != 0) {
@@ -574,14 +588,35 @@ namespace {
             std::snprintf(line, sizeof line, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
             r->drawString(line, false, x + 20, y + 75, 20, r->a(White));
         }
-        const char *region = RegionName(g_status.home_derp);
-        char relay[48] = "";
-        if (g_status.home_derp) {
-            if (region) std::snprintf(relay, sizeof relay, ", relay %s", region);
-            else std::snprintf(relay, sizeof relay, ", relay region %u", g_status.home_derp);
+        if (g_status.version >= 3) {
+            std::snprintf(line, sizeof line, "%u peers", g_status.peers);
+        } else {
+            // Older sysmodules: the home relay, and "direct" once any peer was.
+            const char *region = RegionName(g_status.home_derp);
+            char relay[48] = "";
+            if (g_status.home_derp) {
+                if (region) std::snprintf(relay, sizeof relay, ", relay %s", region);
+                else std::snprintf(relay, sizeof relay, ", relay region %u", g_status.home_derp);
+            }
+            std::snprintf(line, sizeof line, "%u peers%s%s", g_status.peers, relay, (g_status.flags & TSNX_CTL_FLAG_DIRECT) ? ", direct" : "");
         }
-        std::snprintf(line, sizeof line, "%u peers%s%s", g_status.peers, relay, (g_status.flags & TSNX_CTL_FLAG_DIRECT) ? ", direct" : "");
         r->drawString(line, false, x + 20, y + 102, 17, r->a(Grey));
+        // The peers in use, and whether each is relayed (slower) or direct.
+        if (g_status.state == TSNX_CTL_CONNECTED) {
+            for (u32 i = 0; i < std::min<u32>(g_peer_count, 2); i++) {
+                const TsnxCtlPeer &p = g_peers[i];
+                if (!p.name[0]) continue;
+                // Long names are shortened so the path always shows.
+                char name[24];
+                if (std::strlen(p.name) > 18) std::snprintf(name, sizeof name, "%.17s...", p.name);
+                else std::snprintf(name, sizeof name, "%s", p.name);
+                const char *via = RegionName(p.relay_region);
+                if (p.direct) std::snprintf(line, sizeof line, "%s: direct", name);
+                else if (via) std::snprintf(line, sizeof line, "%s: relayed via %s", name, via);
+                else std::snprintf(line, sizeof line, "%s: relayed", name);
+                r->drawString(line, false, x + 20, y + 125 + static_cast<s32>(i) * 21, 15, r->a(p.direct ? Green : Yellow), w - 40);
+            }
+        }
         if (g_last_error[0] && g_status.state != TSNX_CTL_CONNECTED && g_status.state != TSNX_CTL_PAUSED) {
             char error[sizeof g_last_error + 16];
             std::snprintf(error, sizeof error, "Last error: %s", g_last_error);

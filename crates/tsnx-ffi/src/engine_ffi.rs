@@ -451,6 +451,32 @@ pub unsafe extern "C" fn tsnx_net_readiness(e: *mut TsnxEngine, id: i32) -> u32 
 /// Returns the full length (like snprintf).
 /// Copies our current private node key into `out` (32 bytes), to persist it
 /// after TSNX_EVENT_NODE_KEY. Never put it in logs.
+/// A recently used peer and its path (see tsnx_engine_active_peers).
+#[repr(C)]
+pub struct TsnxActivePeer {
+    pub name: [c_char; 32],
+    pub direct: u8,
+    pub _reserved: [u8; 3],
+    pub relay_region: u32,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn tsnx_engine_active_peers(e: *mut TsnxEngine, out: *mut TsnxActivePeer, max: usize) -> usize {
+    let peers = (*e).engine.active_peers();
+    let n = peers.len().min(max);
+    for (i, p) in peers.iter().take(n).enumerate() {
+        let o = &mut *out.add(i);
+        o.name = [0; 32];
+        for (dst, src) in o.name.iter_mut().zip(p.name.bytes().take(31)) {
+            *dst = src as c_char;
+        }
+        o.direct = p.relay.is_none() as u8;
+        o._reserved = [0; 3];
+        o.relay_region = p.relay.unwrap_or(0);
+    }
+    n
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn tsnx_engine_node_key(e: *mut TsnxEngine, out: *mut u8) {
     core::ptr::copy_nonoverlapping((*e).engine.node_private_key().as_ptr(), out, 32);
