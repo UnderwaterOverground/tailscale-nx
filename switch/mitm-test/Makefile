@@ -45,7 +45,7 @@ INCLUDES	:=	include ../../native/interpose
 #ROMFS	:=	romfs
 APP_TITLE	:=	tailscale-nx MITM test
 APP_AUTHOR	:=	UnderwaterOverground
-APP_VERSION	:=	1.1.1
+APP_VERSION	:=	1.1.2
 
 #---------------------------------------------------------------------------------
 # options for code generation
