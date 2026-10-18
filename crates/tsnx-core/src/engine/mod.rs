@@ -9,6 +9,7 @@ mod netmap;
 mod packet;
 pub mod taildrop;
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -139,7 +140,9 @@ pub struct Engine {
     magic: magic::MagicState,
     derp_nodes: BTreeMap<u32, DerpNode>,
     home_derp: Option<u32>,
-    derps: BTreeMap<u32, DerpConn>,
+    // Boxed: a DerpConn is ~1.4 KB, and inserting one by value put several
+    // copies on the calling thread's stack (bsd:u MITM threads have 20 KB).
+    derps: BTreeMap<u32, Box<DerpConn>>,
     derp_backoff: Backoff,
     derp_retry_at: Option<Instant>,
     owners: BTreeMap<ConnId, Owner>,
@@ -677,6 +680,9 @@ impl Engine {
     /// Switches WireGuard and DERP to a new node key (control replaced an
     /// expired one). Peers learn the new key from the netmap and handshake
     /// again; DERP reconnects under the new identity.
+    // Not inlined: it builds a tunnel Endpoint by value, which would
+    // otherwise sit in pump's frame on every call.
+    #[inline(never)]
     fn rotate_node_key(&mut self, key: [u8; 32]) {
         self.node_private = NodePrivateKey::from_bytes(key);
         self.node_private_bytes = key;
@@ -728,6 +734,7 @@ impl Engine {
         (self.wall.1 + self.now.saturating_duration_since(self.wall.0)).as_secs()
     }
 
+    #[inline(never)] // like rotate_node_key: keeps netmap parsing out of pump's frame
     fn apply_map(&mut self, json: &[u8]) -> Result<(), String> {
         let m = netmap::parse(json).map_err(|e| e.to_string())?;
         self.filter.update(m.packet_filter.as_deref(), m.packet_filters.as_ref());
@@ -924,14 +931,21 @@ impl Engine {
     // ---- DERP connections -----------------------------------------------
 
     fn ensure_derp(&mut self, region: u32) {
-        if self.derps.contains_key(&region) {
-            return;
+        if !self.derps.contains_key(&region) {
+            self.open_derp(region);
         }
+    }
+
+    // Kept out of ensure_derp, which runs on every DERP send.
+    #[cold]
+    #[inline(never)]
+    fn open_derp(&mut self, region: u32) {
         let Some(node) = self.derp_nodes.get(&region).cloned() else { return };
         let id = self.alloc_conn(Owner::Derp(region));
         self.io.push_back(Io::Connect { id, host: node.connect_host.clone(), port: node.port });
         let now = self.now;
-        self.derps.insert(region, DerpConn { id, node, client: None, queue: VecDeque::new(), last_rx: now, last_used: now });
+        let conn = Box::new(DerpConn { id, node, client: None, queue: VecDeque::new(), last_rx: now, last_used: now });
+        self.derps.insert(region, conn);
     }
 
     fn derp_send(&mut self, region: u32, dst: NodePublicKey, pkt: Vec<u8>) {
