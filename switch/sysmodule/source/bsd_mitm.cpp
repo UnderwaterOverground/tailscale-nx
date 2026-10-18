@@ -760,9 +760,13 @@ namespace ams::bsd_mitm {
         // Matches what other bsd MITMs use; Start() checks the real service's
         // pointer buffer fits (a smaller one would abort on every session).
         constexpr size_t PointerBufferSize = 0x1000;
-        // A homebrew app opens ~4 sessions (main + clones + monitor), and
-        // hbmenu runs one app at a time (plus a listed forwarder, at most).
-        constexpr size_t MaxSessions = 16;
+        // libnx opens a monitor session plus a pool of num_bsd_sessions (main
+        // and clones, at most 16). Borealis apps ask for 12 in full-memory
+        // mode and Artemis for the full 16: 17 sessions. One short and the
+        // app's socketInitialize fails, leaving it with no sockets at all.
+        // 24 also covers an applet-mode app (pool of 6) alongside. Each
+        // session costs ~4.4 KB, mostly its pointer buffer.
+        constexpr size_t MaxSessions = 24;
 
         struct ServerOptions {
             static constexpr size_t PointerBufferSize   = bsd_mitm::PointerBufferSize;
