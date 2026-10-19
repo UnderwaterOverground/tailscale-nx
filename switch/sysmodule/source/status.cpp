@@ -302,7 +302,10 @@ namespace ams::status {
         }
         const u64 ran = g_engine_ran_ns;
         const u64 idle_s = ran && now > ran ? (now - ran) / 1'000'000'000ull : 0;
-        if (idle_s >= 3 && s.state != TSNX_CTL_PAUSED && s.state != TSNX_CTL_STOPPING) s.engine_stalled_s = static_cast<u32>(idle_s);
+        // Suspended (the console dozing or asleep, or paused) isn't stuck:
+        // the loop is meant to be idle. Resuming counts as a round.
+        const bool suspended = g_runtime && g_runtime->IsSuspended();
+        if (idle_s >= 3 && !suspended && s.state != TSNX_CTL_PAUSED && s.state != TSNX_CTL_STOPPING) s.engine_stalled_s = static_cast<u32>(idle_s);
         // A stuck loop can't log where it is: say it from here (the overlay
         // asks twice a second while it's open).
         if (s.engine_stalled_s >= 10 && !g_stall_logged.exchange(true)) {

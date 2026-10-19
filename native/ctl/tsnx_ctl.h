@@ -56,7 +56,8 @@ typedef struct {
     uint32_t memory_kb;       // what tailscale-nx takes (fixed), 0 if unknown
     uint32_t system_free_kb;  // free system memory, which sysmodules share
     // Seconds since the engine loop last ran a round (it runs at least once
-    // a second), 0 below 3 s or while paused: anything more means it's stuck.
+    // a second), 0 below 3 s or while paused or asleep: anything more means
+    // it's stuck.
     // Always 0 from sysmodules before 1.1.
     uint32_t engine_stalled_s;
     uint32_t reserved[7];
