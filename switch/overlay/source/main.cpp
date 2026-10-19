@@ -538,15 +538,22 @@ namespace {
         }
     }
 
-    // How a peer is reached: "Direct 4 ms", "Relayed via London 45 ms".
-    void PeerPath(const TsnxCtlPeer &p, char *out, size_t cap) {
-        const char *via = RegionName(p.relay_region);
-        char how[40];
-        if (p.direct) std::snprintf(how, sizeof how, "Direct");
-        else if (via) std::snprintf(how, sizeof how, "Relayed via %s", via);
-        else std::snprintf(how, sizeof how, "Relayed");
-        if (p.latency_ms) std::snprintf(out, cap, "%s %u ms", how, p.latency_ms);
-        else std::snprintf(out, cap, "%s", how);
+    // How a peer is reached: "Direct 4 ms", or "via London 45 ms" when
+    // relayed. Too wide for `w` pixels, the city is cut ("via Johanne...
+    // 180 ms"), never the latency.
+    void PeerPath(tsl::gfx::Renderer *r, const TsnxCtlPeer &p, s32 w, char *out, size_t cap) {
+        char ms[12] = "";
+        if (p.latency_ms) std::snprintf(ms, sizeof ms, " %u ms", p.latency_ms);
+        const char *via = p.direct ? nullptr : RegionName(p.relay_region);
+        if (!via) {
+            std::snprintf(out, cap, "%s%s", p.direct ? "Direct" : "Relayed", ms);
+            return;
+        }
+        std::snprintf(out, cap, "via %s%s", via, ms);
+        for (int n = static_cast<int>(std::strlen(via)) - 1; n > 0 && TextWidth(r, out, 17) > w; n--) {
+            if (via[n - 1] == ' ') continue;  // not "Sao ..."
+            std::snprintf(out, cap, "via %.*s...%s", n, via, ms);
+        }
     }
 
     tsl::Color PathColor(const TsnxCtlPeer &p) { return p.direct ? Green : Yellow; }
@@ -776,7 +783,7 @@ namespace {
                 } else {
                     r->drawString("Devices used in the last 45 seconds.", false, x + 20, y + 25, 15, r->a(Grey));
                 }
-                r->drawString("Direct is fastest; relayed goes through Tailscale.", false, x + 20, y + 47, 15, r->a(Grey));
+                r->drawString("Direct is fastest; via a city means it's relayed.", false, x + 20, y + 47, 15, r->a(Grey));
                 const u32 n = g_peers_shown;
                 if (n == 0) {
                     r->drawString("None right now.", false, x + 20, y + 95, 17, r->a(White));
@@ -791,16 +798,26 @@ namespace {
                         r->drawRect(x + 6, ry, w - 12, RowHeight, r->a(Selected));  // a 2-pixel border
                         r->drawRect(x + 8, ry + 2, w - 16, RowHeight - 4, r->a(Black));
                     }
-                    // The name, then the path at the right: never cut, so a
-                    // long name gets whatever room its own path leaves.
-                    char path[48];
-                    PeerPath(p, path, sizeof path);
-                    const s32 path_x = x + w - 20 - TextWidth(r, path, 17);
-                    r->drawString(path, false, path_x, ry + 22, 17, r->a(PathColor(p)));
-                    const s32 room = path_x - 14 - (x + 20);
+                    // The path at the right, the name at the left: each has
+                    // what it needs, and when both are long, half the row.
+                    const s32 left = x + 20, right = x + w - 20, gap = 14;
+                    const s32 half = (right - left - gap) / 2, name_w = p.name[0] ? TextWidth(r, p.name, 17) : 0;
+                    char full[48], path[48];
+                    PeerPath(r, p, 1 << 20, full, sizeof full);
+                    const s32 full_w = TextWidth(r, full, 17);
+                    const s32 path_w = std::min(full_w, std::max(half, right - left - gap - name_w));
+                    PeerPath(r, p, path_w, path, sizeof path);
+                    const s32 room = right - path_w - gap - left;
+                    const bool long_name = name_w > room, long_path = full_w > path_w;
+                    if (row == m_sel) Turns(long_name, long_path);
+                    if (row == m_sel && long_path && m_turn == PathTurn) {
+                        Marquee(r, full, right - path_w, ry, path_w, PathColor(p));
+                    } else {
+                        r->drawString(path, false, right - TextWidth(r, path, 17), ry + 22, 17, r->a(PathColor(p)));
+                    }
                     if (!p.name[0]) continue;
-                    if (row == m_sel && TextWidth(r, p.name, 17) > room) {
-                        Marquee(r, p.name, x + 20, ry, room);
+                    if (row == m_sel && long_name && m_turn == NameTurn) {
+                        Marquee(r, p.name, left, ry, room, White);
                     } else {
                         char name[sizeof p.name + 4];
                         Fit(r, p.name, 17, room, name, sizeof name);
@@ -851,6 +868,7 @@ namespace {
                 std::snprintf(m_sel_name, sizeof m_sel_name, "%s", g_peers[g_by_name[m_sel]].name);
                 m_scroll = 0;
                 m_wait = 0;
+                m_turn = NameTurn;
             }
 
             // Keeps the selection on the same peer as others come and go, and
@@ -868,21 +886,38 @@ namespace {
                 m_top = std::min(m_top, n > visible ? n - visible : 0);
             }
 
-            // A name too long for its row, scrolling by (like Tesla's list
-            // items): still for a second and a half, then a pixel a frame.
-            void Marquee(tsl::gfx::Renderer *r, const char *name, s32 x, s32 ry, s32 w) {
-                const s32 loop = TextWidth(r, name, 17) + 40;
-                if (m_wait < 90) m_wait++;
-                else if (++m_scroll >= loop) m_scroll = m_wait = 0;
+            // The selected row's name and path take turns to scroll when
+            // both are too long, so only one moves at a time.
+            void Turns(bool long_name, bool long_path) {
+                const u32 turn = !long_name && long_path ? PathTurn : !long_path && long_name ? NameTurn : m_turn;
+                if (turn == m_turn) return;
+                m_turn = turn;
+                m_scroll = m_wait = 0;
+            }
+
+            // Text too long for its place, scrolling by (like Tesla's list
+            // items): still for a second and a half, then a pixel a frame;
+            // then it's the other's turn.
+            void Marquee(tsl::gfx::Renderer *r, const char *text, s32 x, s32 ry, s32 w, tsl::Color c) {
+                const s32 loop = TextWidth(r, text, 17) + 40;
+                if (m_wait < 90) {
+                    m_wait++;
+                } else if (++m_scroll >= loop) {
+                    m_scroll = m_wait = 0;
+                    m_turn = m_turn == NameTurn ? PathTurn : NameTurn;
+                }
                 r->enableScissoring(x, ry, w, RowHeight);
-                r->drawString(name, false, x - m_scroll, ry + 22, 17, r->a(White));
-                r->drawString(name, false, x - m_scroll + loop, ry + 22, 17, r->a(White));
+                r->drawString(text, false, x - m_scroll, ry + 22, 17, r->a(c));
+                r->drawString(text, false, x - m_scroll + loop, ry + 22, 17, r->a(c));
                 r->disableScissoring();
             }
+
+            static constexpr u32 NameTurn = 0, PathTurn = 1;
 
             u32 m_sel = 0, m_top = 0;
             char m_sel_name[sizeof(TsnxCtlPeer::name)] = {};
             s32 m_scroll = 0, m_wait = 0;
+            u32 m_turn = NameTurn;
             u32 m_repeat = 0;
     };
 
