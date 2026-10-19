@@ -28,7 +28,7 @@ card, adding them to the folders already there:
 | Path | What |
 |---|---|
 | `atmosphere/contents/4200000000005453/` | The sysmodule. `flags/boot2.flag` makes it start at boot. |
-| `switch/.overlays/tailscale-nx.ovl` | The overlay: status, a pause switch, stop and start, and the login QR code |
+| `switch/.overlays/tailscale-nx.ovl` | The overlay: status, the connections in use, a pause switch, stop and start, and the login QR code |
 | `config/tailscale-nx/config.ini.example` | Settings template (optional; see below) |
 
 Then restart the console.
@@ -116,6 +116,12 @@ Until either happens, the Switch can't reach the tailnet.
   reason is in `sysmodule.log`). This request shows GitHub the console's
   public IP address, as any web request does. Nothing else is sent. Turn
   it off with **Check for updates** in the overlay.
+- **Connections:** the overlay's **Connections** page lists the devices
+  the Switch has used in the last 45 seconds, by name, and how each is
+  reached: **Direct** (green), or **via** a city (yellow) when the traffic is
+  relayed through Tailscale's server there. Each shows the latency, the time
+  a message takes to get there and back. Relayed connections are slower;
+  see [Moonlight is slow away from home](#troubleshooting).
 - **Pause:** use the **Tailscale** switch in the overlay. While paused,
   tailnet connections fail at once and everything else works normally.
 - **Stop and start:** **Stop tailscale-nx** in the overlay ends the
@@ -286,6 +292,11 @@ sockets use more of that heap, up to the `overlay_budget_kb` limit.
   - To watch it live, set `log_udp` to a computer's address.
 - **An app reports "no buffer space" (errno 105).**
   - All apps share the tailnet socket memory. Raise `overlay_budget_kb`.
+- **Moonlight is slow or choppy away from home.**
+  - Open the overlay's **Connections** page while streaming. If the PC shows
+    "via" a city, the stream is relayed. Some networks (hotel and mobile
+    ones especially) block direct connections; a direct path is often found
+    a few seconds after the stream starts.
 - **Moonlight finds the PC at home but not away.**
   - Check that Moonlight's saved host includes the tailnet name or `100.x`
     address, and that the overlay shows **Connected**.

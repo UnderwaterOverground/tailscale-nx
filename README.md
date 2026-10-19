@@ -16,6 +16,8 @@ without opening ports on your router.
 
 ## Features
 
+<img src="docs/images/connections.png" align="right" width="280" alt="The overlay's Connections page: devices in use, each Direct or via a relay city, with latency">
+
 - **Starts at boot** and stays connected in the background, through sleep
   and wake.
 - **Homebrew reaches your tailnet:** apps launched from hbmenu can connect
@@ -26,7 +28,9 @@ without opening ports on your router.
 - **Direct connections** between devices where possible, with Tailscale's
   relays (DERP) as a fallback, just like the official clients.
 - **Overlay** (Ultrahand): status, the Switch's tailnet IP, a pause switch,
-  stop and start, and a QR code for logging in.
+  stop and start, and a QR code for logging in. Its **Connections** page
+  lists the devices in use, whether each is reached directly or through a
+  relay, and the latency.
 - **Update notice:** a notification at boot when a newer release is out
   (can be turned off).
 - **Easy login:** scan a QR code, or put an auth key in a config file. Key
@@ -139,6 +143,10 @@ all the settings, sys-ftpd and more.
 Add your PC in Moonlight by its tailnet name (e.g. `gaming-pc`) or its
 `100.x` address. At home, Moonlight may find the PC on your local network
 and use that instead, which is fine. Away from home, it uses the tailnet.
+
+Streams are smoothest over a direct connection. While streaming, open the
+overlay's **Connections** page: "Direct" is best, and "via" a city means the
+stream is relayed through Tailscale's server there, which adds latency.
 
 ## Known limitations
 
