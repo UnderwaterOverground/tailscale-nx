@@ -74,7 +74,7 @@ The sysmodule's boot-time update check (`native/driver/tsnx_update.c`) runs
 the same way against the real GitHub. Pass the version to compare with:
 
 ```sh
-target/tsnx-c --update-check 1.0.0   # latest 1.1.2: newer
+target/tsnx-c --update-check 1.0.0   # latest 1.1.3: newer
 ```
 
 ### Running unmodified programs over the tailnet (the MITM's code paths)
