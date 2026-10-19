@@ -1069,7 +1069,7 @@ mod tests {
 
     const HOME: u32 = 1;
 
-    fn engine(now: Instant) -> Engine {
+    pub(super) fn engine(now: Instant) -> Engine {
         let cfg = EngineConfig {
             control: ControlConfig { url: "http://control.test".into(), auth_key: None, hostname: "test".into(), extra_roots: Vec::new() },
             machine_private: [1; 32],
@@ -1089,7 +1089,7 @@ mod tests {
         io.iter().filter(|io| matches!(io, Io::Connect { id, .. } if matches!(e.owners.get(id), Some(Owner::Derp(HOME))))).count()
     }
 
-    fn add_peer(e: &mut Engine, id: i64, name: &str, home_derp: Option<u32>, path: magic::PathState) {
+    pub(super) fn add_peer(e: &mut Engine, id: i64, name: &str, home_derp: Option<u32>, path: magic::PathState) {
         let peer = Peer {
             name: name.into(),
             key: NodePublicKey::from_bytes([id as u8; 32]),

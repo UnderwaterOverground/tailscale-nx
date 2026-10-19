@@ -14,6 +14,12 @@ crate-type = ["staticlib"]
 tsnx-core.workspace = true
 log.workspace = true
 
+# The app and sysmodule log at Info at most (tsnx_set_log_callback(.., 3)):
+# leave out every debug and trace call, here and in the crates beneath, at
+# compile time. Hosts keep them (TSNX_LOG_LEVEL).
+[target.'cfg(target_os = "horizon")'.dependencies]
+log = { workspace = true, features = ["max_level_info"] }
+
 [features]
 # Use the Switch's overlay buffer limits on hosts (memory tests).
 switch-limits = ["tsnx-core/switch-limits"]

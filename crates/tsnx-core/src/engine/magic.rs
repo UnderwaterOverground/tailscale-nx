@@ -4,7 +4,8 @@
 //! meanwhile disco pings go to every candidate endpoint of the peer (and a
 //! CallMeMaybe via DERP asks it to ping us back, punching NAT holes). A pong
 //! proves a direct path, which then carries traffic while heartbeat pings keep
-//! it confirmed. If confirmation lapses, traffic falls back to DERP.
+//! it confirmed. If confirmation lapses, traffic falls back to DERP. While a
+//! peer is relayed, each round also pings it through DERP, to time that path.
 
 use alloc::vec::Vec;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -30,6 +31,8 @@ const PING_ROUND_INTERVAL: Duration = Duration::from_secs(5);
 const CALL_ME_MAYBE_INTERVAL: Duration = Duration::from_secs(5);
 /// A peer counts as active this long after traffic.
 const SESSION_ACTIVE: Duration = Duration::from_secs(45);
+/// A relayed path's measured round trip is shown for this long.
+const RELAY_LATENCY_FRESH: Duration = Duration::from_secs(15);
 const PING_TIMEOUT: Duration = Duration::from_secs(5);
 const STUN_INTERVAL: Duration = Duration::from_secs(23);
 const STUN_RETRY: Duration = Duration::from_secs(3);
@@ -73,6 +76,8 @@ pub(super) struct PathState {
     unanswered_since: Option<Instant>,
     /// Last time undecryptable data from this peer made us re-handshake.
     last_session_repair: Option<Instant>,
+    /// The last round trip of a ping through DERP, and when it came back.
+    relay_latency: Option<(Duration, Instant)>,
 }
 
 impl PathState {
@@ -99,8 +104,8 @@ pub struct ActivePeer<'a> {
     /// None: a confirmed direct path. Some(region): relayed through that
     /// DERP region (0 if no region is known yet).
     pub relay: Option<u32>,
-    /// A direct path's round trip, from its last pong (none when relayed:
-    /// we don't ping through DERP).
+    /// The path's round trip: a direct one's from its last pong, a relayed
+    /// one's from the last ping through DERP (None until measured).
     pub latency: Option<Duration>,
 }
 
@@ -158,7 +163,10 @@ impl Engine {
             .filter_map(|p| {
                 let (relay, latency) = match p.path.trusted(now) {
                     Some(_) => (None, p.path.best.map(|b| b.latency)),
-                    None => (Some(p.home_derp.or(self.home_derp).unwrap_or(0)), None),
+                    None => {
+                        let fresh = p.path.relay_latency.filter(|(_, at)| now.saturating_duration_since(*at) < RELAY_LATENCY_FRESH);
+                        (Some(p.home_derp.or(self.home_derp).unwrap_or(0)), fresh.map(|(l, _)| l))
+                    }
                 };
                 let name = p.name.split('.').next().unwrap_or_default();
                 Some((p.path.last_active?, ActivePeer { name, relay, latency }))
@@ -271,6 +279,7 @@ impl Engine {
         path.pings.retain(|(_, _, sent)| now.saturating_duration_since(*sent) < PING_TIMEOUT);
 
         let mut targets: Vec<SocketAddr> = Vec::new();
+        let mut relay_ping = false;
         let round_due = force || path.last_round.is_none_or(|t| now.saturating_duration_since(t) >= PING_ROUND_INTERVAL);
         match path.trusted(now) {
             // Healthy direct path: just heartbeat it.
@@ -283,6 +292,7 @@ impl Engine {
             }
             None if round_due => {
                 path.last_round = Some(now);
+                relay_ping = true;
                 for ep in peer.endpoints.iter().chain(path.candidates.iter()) {
                     if !targets.contains(ep) && is_usable(ep) {
                         targets.push(*ep);
@@ -301,17 +311,14 @@ impl Engine {
         let peer_key = peer.key;
 
         for addr in targets {
-            let mut tx_id = [0u8; 12];
-            if crate::rng::fill(&mut tx_id).is_err() {
-                return;
-            }
-            let msg = Message::Ping { tx_id, node_key: None };
-            if let Some(pkt) = self.seal_disco(&their_disco, &msg) {
-                if let Some(p) = self.peers.get_mut(&node_id) {
-                    p.path.pings.push((tx_id, addr, now));
-                }
-                self.io.push_back(Io::SendUdp { dst: addr, data: pkt });
-            }
+            let Some(pkt) = self.new_ping(node_id, &their_disco, addr) else { return };
+            self.io.push_back(Io::SendUdp { dst: addr, data: pkt });
+        }
+        // Relayed: through DERP too, to time the path the traffic takes. It's
+        // filed under Go's "via DERP" address, which no UDP pong can match.
+        if let (true, Some(region)) = (relay_ping, region) {
+            let Some(pkt) = self.new_ping(node_id, &their_disco, via_derp(region)) else { return };
+            self.derp_send(region, peer_key, pkt);
         }
         if send_cmm {
             if let (Some(region), Some(pkt)) =
@@ -320,6 +327,17 @@ impl Engine {
                 self.derp_send(region, peer_key, pkt);
             }
         }
+    }
+
+    /// A disco ping for the peer, filed under `dst` (where it goes) so its
+    /// pong can be matched.
+    fn new_ping(&mut self, node_id: i64, to: &ts_keys::DiscoPublicKey, dst: SocketAddr) -> Option<Vec<u8>> {
+        let mut tx_id = [0u8; 12];
+        crate::rng::fill(&mut tx_id).ok()?;
+        let pkt = self.seal_disco(to, &Message::Ping { tx_id, node_key: None })?;
+        let now = self.now;
+        self.peers.get_mut(&node_id)?.path.pings.push((tx_id, dst, now));
+        Some(pkt)
     }
 
     fn seal_disco(&self, to: &ts_keys::DiscoPublicKey, msg: &Message) -> Option<Vec<u8>> {
@@ -341,7 +359,7 @@ impl Engine {
             Message::Ping { tx_id, .. } => {
                 let observed = match source {
                     Source::Udp(addr) => addr,
-                    Source::Derp { region, .. } => SocketAddr::new(IpAddr::V4(DERP_MAGIC_IP), region as u16),
+                    Source::Derp { region, .. } => via_derp(region),
                 };
                 let Some(pong) = self.seal_disco(&from, &Message::Pong { tx_id, src: observed }) else { return };
                 match source {
@@ -368,6 +386,13 @@ impl Engine {
                 let Some(i) = peer.path.pings.iter().position(|(id, _, _)| *id == tx_id) else { return };
                 let (_, addr, sent) = peer.path.pings.swap_remove(i);
                 let latency = now.saturating_duration_since(sent);
+                // A ping through DERP, answered through DERP: the relayed path's round trip.
+                if addr.ip() == IpAddr::V4(DERP_MAGIC_IP) {
+                    if matches!(source, Source::Derp { .. }) {
+                        peer.path.relay_latency = Some((latency, now));
+                    }
+                    return;
+                }
                 // Only a pong received directly from that address proves the path.
                 if !matches!(source, Source::Udp(a) if a == addr) {
                     return;
@@ -600,13 +625,49 @@ impl Engine {
     }
 }
 
+/// Go's address for a path through DERP region `region`.
+fn via_derp(region: u32) -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(DERP_MAGIC_IP), region as u16)
+}
+
 fn is_usable(ep: &SocketAddr) -> bool {
     ep.port() != 0 && !ep.ip().is_unspecified() && !ep.ip().is_multicast()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_wg_data;
+    use super::*;
+    use ts_keys::DiscoPrivateKey;
+
+    #[test]
+    fn relayed_peers_are_timed_through_derp() {
+        let start = Instant::from_nanos(1_000_000_000);
+        let mut e = super::super::tests::engine(start);
+        let theirs = DiscoPrivateKey::from_bytes([9; 32]);
+        super::super::tests::add_peer(&mut e, 1, "gaming-pc.tail1234.ts.net.", Some(8), PathState::for_test(Some(start), None));
+        let peer = e.peers.get_mut(&1).unwrap();
+        peer.disco = Some(theirs.public_key());
+        let their_node = peer.key;
+        e.by_disco.insert(super::super::disco_bytes(&theirs.public_key()), 1);
+
+        // No direct path: a round pings through the peer's DERP region too.
+        e.discover(1, false);
+        let (tx_id, _, _) = *e.peers[&1].path.pings.iter().find(|(_, addr, _)| *addr == via_derp(8)).expect("a ping through DERP");
+        assert_eq!(e.active_peers()[0].latency, None);
+
+        // Its pong comes back through DERP 40 ms later.
+        e.now = start + Duration::from_millis(40);
+        let pong = disco::seal(&theirs, &e.disco_private.public_key(), &their_node, &Message::Pong { tx_id, src: via_derp(8) }).unwrap();
+        e.handle_disco(Source::Derp { region: 8, node: their_node }, &pong);
+        let peer = &e.active_peers()[0];
+        assert_eq!((peer.relay, peer.latency), (Some(8), Some(Duration::from_millis(40))));
+        // It doesn't count as a direct path.
+        assert!(e.peers[&1].path.trusted(e.now).is_none());
+
+        // Shown only while fresh.
+        e.now = start + RELAY_LATENCY_FRESH + Duration::from_secs(1);
+        assert_eq!(e.active_peers()[0].latency, None);
+    }
 
     #[test]
     fn keepalives_and_handshakes_are_not_data() {

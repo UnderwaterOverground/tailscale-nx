@@ -538,13 +538,15 @@ namespace {
         }
     }
 
-    // How a peer is reached: "Direct 4 ms", "Relayed via London".
+    // How a peer is reached: "Direct 4 ms", "Relayed via London 45 ms".
     void PeerPath(const TsnxCtlPeer &p, char *out, size_t cap) {
         const char *via = RegionName(p.relay_region);
-        if (p.direct && p.latency_ms) std::snprintf(out, cap, "Direct %u ms", p.latency_ms);
-        else if (p.direct) std::snprintf(out, cap, "Direct");
-        else if (via) std::snprintf(out, cap, "Relayed via %s", via);
-        else std::snprintf(out, cap, "Relayed");
+        char how[40];
+        if (p.direct) std::snprintf(how, sizeof how, "Direct");
+        else if (via) std::snprintf(how, sizeof how, "Relayed via %s", via);
+        else std::snprintf(how, sizeof how, "Relayed");
+        if (p.latency_ms) std::snprintf(out, cap, "%s %u ms", how, p.latency_ms);
+        else std::snprintf(out, cap, "%s", how);
     }
 
     tsl::Color PathColor(const TsnxCtlPeer &p) { return p.direct ? Green : Yellow; }
