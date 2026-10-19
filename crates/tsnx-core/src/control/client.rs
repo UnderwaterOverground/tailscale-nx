@@ -543,7 +543,7 @@ impl ControlClient {
                         if buf.len() < 4 + len {
                             break;
                         }
-                        let msg: Vec<u8> = buf.drain(..4 + len).skip(4).collect();
+                        let msg = take_map_frame(buf, len);
                         if msg != br#"{"KeepAlive":true}"# {
                             new_updates.push(Update::Map(msg));
                         }
@@ -606,6 +606,17 @@ impl ControlClient {
         self.phase = Phase::Idle { until: self.now + delay };
         self.updates.push_back(Update::Error(msg.into()));
     }
+}
+
+/// Takes the length-prefixed frame at the front of `buf` and returns its body
+/// in `buf`'s own allocation, so a full map never needs a second map-sized
+/// block while the receive buffer is still live. Any following bytes stay in
+/// `buf`. The caller has checked that `buf` holds `4 + len` bytes.
+fn take_map_frame(buf: &mut Vec<u8>, len: usize) -> Vec<u8> {
+    let rest = buf.split_off(4 + len);
+    let mut msg = core::mem::replace(buf, rest);
+    msg.drain(..4);
+    msg
 }
 
 /// Like Tailscale's client, an expired node key is replaced by a fresh one,
@@ -693,6 +704,41 @@ mod tests {
 
     fn drain(c: &mut ControlClient) -> Vec<Io> {
         core::iter::from_fn(|| c.poll_io()).collect()
+    }
+
+    #[test]
+    fn single_completed_map_frame_moves_the_original_allocation() {
+        let len = 64_369;
+        let mut buf = Vec::with_capacity(65_536);
+        buf.extend_from_slice(&(len as u32).to_le_bytes());
+        buf.resize(4 + len, b'x');
+        let original = buf.as_ptr();
+
+        let msg = take_map_frame(&mut buf, len);
+
+        assert_eq!(msg.len(), len);
+        assert_eq!(msg.as_ptr(), original, "map body was copied into another allocation");
+        assert!(buf.is_empty());
+        assert_eq!(buf.capacity(), 0, "a second map-sized buffer was allocated");
+    }
+
+    #[test]
+    fn completed_map_frame_keeps_its_allocation_and_only_moves_the_following_frame() {
+        let mut buf = Vec::with_capacity(64);
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(b"one");
+        buf.extend_from_slice(&4u32.to_le_bytes());
+        buf.extend_from_slice(b"next");
+        let original = buf.as_ptr();
+
+        let first = take_map_frame(&mut buf, 3);
+        assert_eq!(first, b"one");
+        assert_eq!(first.as_ptr(), original);
+        assert_eq!(buf, [4, 0, 0, 0, b'n', b'e', b'x', b't']);
+        assert_eq!(buf.capacity(), 8, "only the following frame should be reallocated");
+        let second = take_map_frame(&mut buf, 4);
+        assert_eq!(second, b"next");
+        assert!(buf.is_empty());
     }
 
     #[test]
