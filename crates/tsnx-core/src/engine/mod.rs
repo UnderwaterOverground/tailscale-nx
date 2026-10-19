@@ -1111,7 +1111,7 @@ mod tests {
         let start = Instant::from_nanos(1_000_000_000);
         let now = start + Duration::from_secs(100);
         let mut e = engine(now);
-        let addr: SocketAddr = "192.168.1.100:41641".parse().unwrap();
+        let addr: SocketAddr = "192.0.2.10:41641".parse().unwrap();
         let sent = |ago: u64| Some(now - Duration::from_secs(ago));
         // Direct (pong 2 s ago), sent to 5 s ago.
         add_peer(&mut e, 1, "gaming-pc.tail1234.ts.net.", Some(8), magic::PathState::for_test(sent(5), Some((addr, now - Duration::from_secs(2)))));
