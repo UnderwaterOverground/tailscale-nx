@@ -23,6 +23,12 @@ namespace ams::hosts {
         // The block last written (FNV-1a), to skip rewriting an unchanged one.
         constinit u64 g_last_block_hash = 0;
 
+        // Built by Collect(), for Write().
+        constinit char *g_block = nullptr;
+        constinit size_t g_block_len = 0;
+        constinit int g_block_count = 0;
+        constinit u64 g_block_hash = 0;
+
         u64 Hash(const char *p, size_t n) {
             u64 h = 0xcbf29ce484222325ull;
             for (size_t i = 0; i < n; i++) h = (h ^ static_cast<u8>(p[i])) * 0x100000001b3ull;
@@ -126,7 +132,7 @@ namespace ams::hosts {
 
     }
 
-    void Update(TsnxEngine *engine) {
+    bool Collect(TsnxEngine *engine) {
         // Runs rarely: working buffers come from the heap, not static memory.
         auto lines = std::make_unique<char[]>(MaxBlock);
         auto block = std::make_unique<char[]>(MaxBlock);
@@ -134,8 +140,22 @@ namespace ams::hosts {
         int count = 0;
         const size_t block_len = BuildBlock(lines.get(), block.get(), MaxBlock, std::addressof(count));
         const u64 hash = Hash(block.get(), block_len);
-        if (hash == g_last_block_hash) return;
-        lines.reset();
+        if (hash == g_last_block_hash) return false;
+        delete[] g_block;
+        g_block = block.release();
+        g_block_len = block_len;
+        g_block_count = count;
+        g_block_hash = hash;
+        return true;
+    }
+
+    void Write() {
+        if (!g_block) return;
+        const std::unique_ptr<char[]> block(g_block);
+        g_block = nullptr;
+        const size_t block_len = g_block_len;
+        const int count = g_block_count;
+        const u64 hash = g_block_hash;
 
         char path[0x60];
         if (!SelectPath(path, sizeof path)) {

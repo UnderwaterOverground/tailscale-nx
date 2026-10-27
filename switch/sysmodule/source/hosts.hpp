@@ -15,9 +15,14 @@ extern "C" {
 
 namespace ams::hosts {
 
-    // Rewrites the managed block from the engine's current peers (call with
-    // the runtime lock held). Never creates a hosts file, never touches
+    // Builds the managed block from the engine's current peers (call with
+    // the runtime lock held). Returns whether it changed, for Write().
+    bool Collect(TsnxEngine *engine);
+
+    // Rewrites the managed block with what Collect() built, without the
+    // runtime lock: it reads and rewrites a file on the SD card, which can
+    // take most of a second. Never creates a hosts file, never touches
     // lines outside the block, and skips writing if anything looks off.
-    void Update(TsnxEngine *engine);
+    void Write();
 
 }

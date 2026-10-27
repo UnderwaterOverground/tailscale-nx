@@ -221,9 +221,51 @@ namespace ams {
         }
         constinit sockaddr_in g_log_udp_addr = {};
         // Lines logged before the UDP log socket exists, replayed once it does.
+        // Once the engine loop runs, the buffer holds its thread's lines
+        // instead (g_log_defer_thread).
         constinit char g_early_log[4_KB] = {};
         constinit size_t g_early_log_len = 0;
         constinit bool g_early_log_done = false;
+        // The engine thread, while the engine loop runs: its lines wait in
+        // g_early_log until the loop has released the runtime lock (an SD
+        // write takes 5-9 ms, and homebrew's tailnet sockets wait on that
+        // lock). Other threads write theirs directly, after any waiting.
+        constinit os::ThreadType *g_log_defer_thread = nullptr;
+
+        // Sends lines to the log socket, a datagram each (g_log_mutex held).
+        void SendLogLines(const char *lines, size_t n) {
+            for (size_t off = 0; off < n;) {
+                const char *nl = static_cast<const char *>(std::memchr(lines + off, '\n', n - off));
+                const size_t len = nl ? static_cast<size_t>(nl - (lines + off)) + 1 : n - off;
+                ::sendto(g_log_udp_fd, lines + off, len, 0, reinterpret_cast<sockaddr *>(std::addressof(g_log_udp_addr)), sizeof g_log_udp_addr);
+                off += len;
+            }
+        }
+
+        // Writes lines to the log file and the log socket or tunnel queue
+        // (g_log_mutex held).
+        void EmitLog(const char *lines, size_t n) {
+            if (g_log_open && g_log_offset + static_cast<s64>(n) <= LogMaxSize) {
+                // Logging must never take the sysmodule down: ignore failures.
+                if (R_SUCCEEDED(fs::WriteFile(g_log_file, g_log_offset, lines, n, fs::WriteOption::Flush))) g_log_offset += n;
+            }
+            if (g_log_tailnet) {
+                QueueTailnetLog(lines, n);
+            } else if (g_log_udp_fd >= 0 && g_early_log_done && !g_log_udp_paused) {
+                SendLogLines(lines, n);
+            } else if (!g_early_log_done && g_early_log_len + n <= sizeof g_early_log) {
+                std::memcpy(g_early_log + g_early_log_len, lines, n);
+                g_early_log_len += n;
+            }
+        }
+
+        // Writes the engine thread's waiting lines (g_log_mutex held).
+        void EmitDeferredLog() {
+            if (!g_early_log_done || g_early_log_len == 0) return;
+            const size_t n = g_early_log_len;
+            g_early_log_len = 0;
+            EmitLog(g_early_log, n);
+        }
 
     }  // namespace
 
@@ -241,19 +283,15 @@ namespace ams {
             line[n] = 0;
 
             std::scoped_lock lk(g_log_mutex);
-            if (g_log_open && g_log_offset + n <= LogMaxSize) {
-                // Logging must never take the sysmodule down: ignore failures.
-                if (R_SUCCEEDED(fs::WriteFile(g_log_file, g_log_offset, line, n, fs::WriteOption::Flush))) g_log_offset += n;
-            }
-            if (g_log_tailnet) {
-                QueueTailnetLog(line, n);
-            } else if (g_log_udp_fd >= 0 && g_early_log_done && !g_log_udp_paused) {
-                ::sendto(g_log_udp_fd, line, n, 0, reinterpret_cast<sockaddr *>(std::addressof(g_log_udp_addr)),
-                         sizeof g_log_udp_addr);
-            } else if (!g_early_log_done && g_early_log_len + n <= sizeof g_early_log) {
+            // The engine thread's lines wait for the loop to write them, except
+            // while asleep (the loop doesn't run then).
+            if (g_log_defer_thread == os::GetCurrentThread() && !g_log_udp_paused && g_early_log_len + n <= sizeof g_early_log) {
                 std::memcpy(g_early_log + g_early_log_len, line, n);
                 g_early_log_len += n;
+                return;
             }
+            EmitDeferredLog();
+            EmitLog(line, n);
     }
 
     namespace {
@@ -545,6 +583,7 @@ namespace ams {
                 std::scoped_lock lk(g_log_mutex);
                 g_log_tailnet = true;
                 QueueTailnetLog(g_early_log, g_early_log_len);
+                g_early_log_len = 0;
                 g_early_log_done = true;
                 return;
             }
@@ -608,16 +647,12 @@ namespace ams {
             std::scoped_lock lk(g_log_mutex);
             if (g_early_log_done) return;  // includes the tailnet case (queued instead)
             if (g_log_udp_fd < 0) {
+                g_early_log_len = 0;
                 g_early_log_done = true;
                 return;
             }
-            for (size_t off = 0; off < g_early_log_len;) {
-                const char *nl = static_cast<const char *>(std::memchr(g_early_log + off, '\n', g_early_log_len - off));
-                const size_t len = (nl ? static_cast<size_t>(nl - (g_early_log + off)) : g_early_log_len - off) + 1;
-                ::sendto(g_log_udp_fd, g_early_log + off, len, 0, reinterpret_cast<sockaddr *>(std::addressof(g_log_udp_addr)),
-                         sizeof g_log_udp_addr);
-                off += len;
-            }
+            SendLogLines(g_early_log, g_early_log_len);
+            g_early_log_len = 0;
             g_early_log_done = true;
         }
 
@@ -1105,10 +1140,21 @@ namespace ams {
         // The log socket goes down and up with the engine's own (sleep).
         // Coming back counts as having been offline (see the loop below).
         g_update_check = std::strcmp(cfg.update_check, "off") != 0;
+        // Slow steps of the engine loop run after its tick, without the
+        // runtime lock (see Runtime::Run): the network check (nifm calls,
+        // 3-7 ms), the hosts file (most of a second) and log lines written
+        // to the SD card.
+        bool network_check_due = false, network_checked = false, hosts_due = false;
+        u32 network_ip = 0;
         rt->SetSuspendHooks([] {
+            {
+                std::scoped_lock lk(g_log_mutex);
+                EmitDeferredLog();  // the loop won't run to write them
+            }
             CloseUdpLogSocket();
             SuspendUpdateCheck();
-        }, [&ip] {
+        }, [&ip, &network_checked] {
+            network_checked = false;  // from before the sleep
             g_tailnet_log_hold_until_ns = armTicksToNs(armGetSystemTick()) + 10'000'000'000ull;
             OpenUdpLogSocket();
             ip = 0;
@@ -1140,6 +1186,10 @@ namespace ams {
         bool healthy = false;
         size_t heap_all_peak = 0;
         int batched = 0;  // the driver's batched receive state, as last logged
+        {
+            std::scoped_lock lk(g_log_mutex);
+            g_log_defer_thread = os::GetCurrentThread();
+        }
         // The engine loop runs on core 2 when it can (see bsd_mitm::EngineCores).
         os::SetThreadCoreMask(os::GetCurrentThread(), bsd_mitm::PreferredCore, bsd_mitm::EngineCores);
         rt->Run([&](TsnxDriver *d) {
@@ -1187,12 +1237,15 @@ namespace ams {
             Timed("update check", [&] { StepUpdateCheck(now); });
             if (magicdns && hosts_dirty_since != 0 && now - hosts_dirty_since > 3'000'000'000ull) {
                 hosts_dirty_since = 0;
-                Timed("hosts file update", [&] { hosts::Update(engine); });
+                hosts_due = hosts::Collect(engine);
             }
             if (now - last_check > (ip ? 5'000'000'000ull : 250'000'000ull)) {
                 last_check = now;
-                u32 cur = 0;
-                Timed("network check", [&] { cur = NetworkUp() ? CurrentIp() : 0; });
+                network_check_due = true;
+            }
+            if (network_checked) {
+                network_checked = false;
+                const u32 cur = network_ip;
                 status::SetOffline(cur == 0);
                 if (cur != ip) {
                     Log("local address changed: %s", cur ? inet_ntoa(in_addr{cur}) : "(offline)");
@@ -1202,7 +1255,24 @@ namespace ams {
                     if (cur) tsnx_driver_refresh_endpoints(d);
                 }
             }
+        }, [&] {
+            if (network_check_due) {
+                network_check_due = false;
+                Timed("network check", [&] { network_ip = NetworkUp() ? CurrentIp() : 0; });
+                network_checked = true;
+            }
+            if (hosts_due) {
+                hosts_due = false;
+                Timed("hosts file update", [] { hosts::Write(); });
+            }
+            std::scoped_lock lk(g_log_mutex);
+            EmitDeferredLog();
         });
+        {
+            std::scoped_lock lk(g_log_mutex);
+            g_log_defer_thread = nullptr;
+            EmitDeferredLog();
+        }
         // Only a stop from the overlay ends the loop.
         if (g_stopping) ExitAfterStop();
         Log("engine loop ended unexpectedly; exiting");
@@ -1233,6 +1303,11 @@ namespace ams {
         if (n > static_cast<int>(sizeof line) - 2) n = sizeof line - 2;
         line[n++] = '\n';
         if (g_log_open) {
+            // Lines the engine thread logged since the loop last wrote them.
+            if (g_early_log_done && g_early_log_len) {
+                static_cast<void>(fs::WriteFile(g_log_file, g_log_offset, g_early_log, g_early_log_len, fs::WriteOption::Flush));
+                g_log_offset += g_early_log_len;
+            }
             static_cast<void>(fs::WriteFile(g_log_file, g_log_offset, line, n, fs::WriteOption::Flush));
             g_log_offset += n;
         }
@@ -1247,6 +1322,7 @@ namespace ams {
 }
 
 extern "C" [[noreturn]] void tsnx_platform_panic(const uint8_t *msg, size_t len) {
+    ams::g_log_defer_thread = nullptr;  // written now, with any lines still waiting
     ams::Log("PANIC in tsnx core: %.*s", static_cast<int>(len), reinterpret_cast<const char *>(msg));
     AMS_ABORT("tsnx core panic");
 }
