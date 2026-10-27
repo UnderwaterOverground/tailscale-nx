@@ -1130,6 +1130,7 @@ namespace ams {
         const u64 started = armTicksToNs(armGetSystemTick());
         bool healthy = false;
         size_t heap_all_peak = 0;
+        int batched = 0;  // the driver's batched receive state, as last logged
         rt->Run([&](TsnxDriver *d) {
             const u64 now = armTicksToNs(armGetSystemTick());
             memory::SampleBootLow(now, BootLowWindowNs);
@@ -1161,6 +1162,15 @@ namespace ams {
                 tsnx_heap_classes(classes, sizeof classes);
                 Log("heap by size (KB/allocs): %s", classes);
                 stack_watch::Log();
+            }
+            int bsd_errno = 0;
+            if (const int b = tsnx_driver_batched_receive(d, &bsd_errno); b != batched) {
+                batched = b;
+                if (b > 0) {
+                    Log("udp: batched receive");
+                } else {
+                    Log("udp: one datagram per call (batched receive errno %d)", bsd_errno);
+                }
             }
             FlushTailnetLog(engine);
             Timed("update check", [&] { StepUpdateCheck(now); });

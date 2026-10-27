@@ -17,6 +17,12 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifdef __SWITCH__
+#include <switch.h>
+#include <switch/services/bsd.h>
+#include <sys/iosupport.h>
+#endif
+
 #ifdef TSNX_NO_STDIO
 // Builds without newlib's printf (the sysmodule) supply this instead.
 int tsnx_snprintf(char *dst, size_t size, const char *fmt, ...);
@@ -27,9 +33,12 @@ int tsnx_snprintf(char *dst, size_t size, const char *fmt, ...);
 // Datagrams read per readiness report: the rest wait for the next round, so
 // a socket that keeps "returning" something can't hold the loop.
 #define UDP_RECV_BATCH 64
-// Datagrams tsnx_driver_prefetch reads ahead (underlay datagrams fit a slot).
-#define UDP_STAGED 8
+// Datagrams are read UDP_STAGED at a time into sbuf (page-aligned: on the
+// Switch it is also the socket service's message buffer), UDP_SLOT bytes
+// each (underlay datagrams fit), and handed to the engine from there.
+#define UDP_STAGED 16
 #define UDP_SLOT 2048
+#define SBUF_SIZE (UDP_STAGED * UDP_SLOT)
 
 static const char *volatile g_step;
 #define STEP(s) (g_step = (s))
@@ -62,13 +71,18 @@ struct TsnxDriver {
     TsnxDropSink drop;
     uint32_t drop_id;  // transfer being written, 0 = none
     int in_drop;
-    // Datagrams read by tsnx_driver_prefetch, for dispatch to hand over.
+    // Datagrams read but not yet handed to the engine (in sbuf).
+    uint8_t *sbuf;
     struct {
-        uint8_t data[UDP_SLOT];
+        const uint8_t *data;
         size_t len;
         TsnxAddr src;
     } staged[UDP_STAGED];
     int n_staged, staged_all;  // staged_all: the socket was drained
+    // Batched receive (Switch): 1 works, 0 not known yet, -1 off (and the
+    // socket service's errno, if a call failed); misses: batches that came
+    // back empty while recvfrom then found a datagram.
+    int mmsg_state, mmsg_errno, mmsg_misses;
 };
 
 uint64_t tsnx_driver_now_ns(void) {
@@ -80,6 +94,16 @@ uint64_t tsnx_driver_now_ns(void) {
 TsnxDriver *tsnx_driver_new(TsnxEngine *engine, tsnx_event_fn on_event, void *ctx) {
     TsnxDriver *d = calloc(1, sizeof *d);
     if (!d) return NULL;
+    d->sbuf = aligned_alloc(0x1000, SBUF_SIZE);
+    if (!d->sbuf) {
+        free(d);
+        return NULL;
+    }
+#ifdef __SWITCH__
+    if (hosversionBefore(7, 0, 0)) d->mmsg_state = -1;  // its RecvMMsg is 7.0.0+
+#else
+    d->mmsg_state = -1;
+#endif
     d->engine = engine;
     d->on_event = on_event;
     d->ctx = ctx;
@@ -125,6 +149,7 @@ void tsnx_driver_free(TsnxDriver *d) {
         d->drop.close(d->drop.ctx, 0, ignored, sizeof ignored);
     }
     free(d->connect_map);
+    free(d->sbuf);
     if (d->udp_fd >= 0) close(d->udp_fd);
     for (int i = 0; i < MAX_CONNS; i++)
         if (d->conns[i].id) conn_free(&d->conns[i]);
@@ -246,29 +271,181 @@ static ssize_t udp_read(TsnxDriver *d, uint8_t *buf, size_t cap, TsnxAddr *src) 
     return got;
 }
 
+// Reads datagrams one call each into sbuf's slots. Returns how many.
+static int stage_each(TsnxDriver *d) {
+    int n = 0;
+    while (n < UDP_STAGED) {
+        uint8_t *slot = d->sbuf + (size_t)n * UDP_SLOT;
+        ssize_t got = udp_read(d, slot, UDP_SLOT, &d->staged[n].src);
+        if (got < 0) break;
+        d->staged[n].data = slot;
+        d->staged[n++].len = (size_t)got;
+    }
+    return n;
+}
+
+#ifdef __SWITCH__
+// One bsdRecvMMsg for up to UDP_STAGED datagrams. libnx's recvmmsg mallocs,
+// which libstratosphere's shim aborts on, so this does what it does with
+// sbuf (page-aligned, like libnx's buffer): a 0x08 byte, then per message
+// u32 namelen, name, s32 iovlen, iovlen x (u64 len, data), u32 controllen,
+// control, s32 flags, s32 msg_len, rewritten by the reply with the actual
+// lengths. Returns how many, or -1 with the socket service's errno in *err.
+#define MMSG_HEAD (4 + 16 + 4 + 8)
+#define MMSG_TAIL (4 + 4 + 4)
+#define MMSG_CAP ((SBUF_SIZE - 1) / UDP_STAGED - MMSG_HEAD - MMSG_TAIL)
+_Static_assert(MMSG_CAP >= 1500, "batched receive slots must hold a full datagram");
+#define BSD_EAGAIN 11  // the socket service's errno numbering (Linux's)
+
+static void put(uint8_t **p, const void *v, size_t n) {
+    memcpy(*p, v, n);
+    *p += n;
+}
+
+static int stage_batch(TsnxDriver *d, int *err) {
+    __handle *h = __get_handle(d->udp_fd);
+    if (!h || !h->fileStruct) {
+        *err = 0;
+        return -1;
+    }
+    const int fd = *(const int *)h->fileStruct;  // as libnx's own fd lookup
+    uint8_t *p = d->sbuf;
+    *p++ = 0x08;
+    for (int i = 0; i < UDP_STAGED; i++) {
+        const uint32_t namelen = 16, controllen = 0;
+        const int32_t iovlen = 1, zero = 0;
+        const uint64_t cap = MMSG_CAP;
+        put(&p, &namelen, 4);
+        memset(p, 0, 16);
+        p += 16;
+        put(&p, &iovlen, 4);
+        put(&p, &cap, 8);
+        p += MMSG_CAP;
+        put(&p, &controllen, 4);
+        put(&p, &zero, 4);
+        put(&p, &zero, 4);
+    }
+    struct timespec no_timeout = {0};  // read unconditionally
+    int n = bsdRecvMMsg(fd, d->sbuf, SBUF_SIZE, UDP_STAGED, MSG_DONTWAIT, &no_timeout);
+    if (n < 0) {
+        *err = g_bsdErrno;
+        return -1;
+    }
+    const size_t size = SBUF_SIZE;
+    size_t off = 1;
+    int got = 0;
+    for (int i = 0; i < n && i < UDP_STAGED; i++) {
+        uint32_t namelen, controllen;
+        int32_t iovlen;
+        struct sockaddr_in from;
+        memset(&from, 0, sizeof from);
+        if (off + 4 > size) break;
+        memcpy(&namelen, d->sbuf + off, 4);
+        off += 4;
+        if (namelen > size - off) break;
+        memcpy(&from, d->sbuf + off, namelen < sizeof from ? namelen : sizeof from);
+        off += namelen;
+        if (off + 4 > size) break;
+        memcpy(&iovlen, d->sbuf + off, 4);
+        off += 4;
+        const uint8_t *data = NULL;
+        uint64_t len = 0;
+        int ok = iovlen >= 0;
+        for (int32_t v = 0; v < iovlen && ok; v++) {
+            uint64_t l;
+            if (off + 8 > size) {
+                ok = 0;
+                break;
+            }
+            memcpy(&l, d->sbuf + off, 8);
+            off += 8;
+            if (l > size - off) {
+                ok = 0;
+                break;
+            }
+            if (v == 0) {
+                data = d->sbuf + off;
+                len = l;
+            }
+            off += (size_t)l;
+        }
+        if (!ok || off + 4 > size) break;
+        memcpy(&controllen, d->sbuf + off, 4);
+        off += 4;
+        if (controllen > size - off || off + controllen + 8 > size) break;
+        int32_t msg_len;
+        memcpy(&msg_len, d->sbuf + off + controllen + 4, 4);
+        off += controllen + 8;  // control, flags, msg_len
+        // The datagram's size is msg_len: the reply can leave the iovec at
+        // its full capacity.
+        if (msg_len >= 0 && (uint64_t)msg_len < len) len = (uint64_t)msg_len;
+        if (!data || from.sin_family != AF_INET) continue;
+        to_tsnx_addr(&from, &d->staged[got].src);
+        d->staged[got].data = data;
+        d->staged[got++].len = (size_t)len;
+    }
+    return got;
+}
+#endif
+
+// Reads up to UDP_STAGED datagrams into d->staged (called when the socket
+// was reported readable). Returns how many.
+static int stage(TsnxDriver *d) {
+#ifdef __SWITCH__
+    if (d->mmsg_state >= 0) {
+        int err = 0;
+        int n = stage_batch(d, &err);
+        if (n > 0) {
+            d->mmsg_state = 1;
+            return n;
+        }
+        if (n < 0 && err != BSD_EAGAIN) {
+            d->mmsg_state = -1;  // unsupported here: one datagram per call
+            d->mmsg_errno = err;
+        } else if (d->mmsg_state == 0) {
+            // Empty though poll said readable: check that it isn't the
+            // batch that's broken (then recvfrom finds a datagram).
+            n = stage_each(d);
+            if (n > 0 && ++d->mmsg_misses >= 3) d->mmsg_state = -1;
+            return n;
+        } else {
+            return 0;
+        }
+    }
+#endif
+    return stage_each(d);
+}
+
 void tsnx_driver_prefetch(TsnxDriver *d, const struct pollfd *fds) {
     d->n_staged = 0;
     d->staged_all = 0;
     if (d->poll_udp < 0 || !(fds[d->poll_udp].revents & POLLIN)) return;
-    while (d->n_staged < UDP_STAGED) {
-        STEP("UDP prefetch");
-        ssize_t got = udp_read(d, d->staged[d->n_staged].data, UDP_SLOT, &d->staged[d->n_staged].src);
-        if (got < 0) {
-            d->staged_all = 1;
-            return;
-        }
-        d->staged[d->n_staged++].len = (size_t)got;
+    STEP("UDP prefetch");
+    d->n_staged = stage(d);
+    d->staged_all = d->n_staged < UDP_STAGED;
+}
+
+// Hands the staged datagrams to the engine, then reads and hands over more
+// until the socket is drained (or UDP_RECV_BATCH, so it can't hold the loop).
+static void udp_receive(TsnxDriver *d) {
+    int handled = 0;
+    for (;;) {
+        for (int i = 0; i < d->n_staged; i++)
+            tsnx_engine_udp(d->engine, &d->staged[i].src, d->staged[i].data, d->staged[i].len, tsnx_driver_now_ns());
+        handled += d->n_staged;
+        const int drained = d->staged_all;
+        d->n_staged = 0;
+        d->staged_all = 0;
+        if (drained || handled >= UDP_RECV_BATCH) return;
+        STEP("UDP receive");
+        d->n_staged = stage(d);
+        d->staged_all = d->n_staged < UDP_STAGED;
     }
 }
 
-static void udp_receive(TsnxDriver *d) {
-    for (int i = 0; i < UDP_RECV_BATCH; i++) {
-        STEP("UDP receive");
-        TsnxAddr src;
-        ssize_t got = udp_read(d, d->rbuf, sizeof d->rbuf, &src);
-        if (got < 0) return;  // drained (or nothing usable: next round)
-        tsnx_engine_udp(d->engine, &src, d->rbuf, (size_t)got, tsnx_driver_now_ns());
-    }
+int tsnx_driver_batched_receive(TsnxDriver *d, int *bsd_errno) {
+    if (bsd_errno) *bsd_errno = d->mmsg_errno;
+    return d->mmsg_state;
 }
 
 static void do_connect(TsnxDriver *d, uint32_t id, const char *target, uint16_t port) {
@@ -505,11 +682,7 @@ int tsnx_driver_poll_stale(TsnxDriver *d, uint64_t until_ns) {
 
 void tsnx_driver_dispatch(TsnxDriver *d, const struct pollfd *fds) {
     if (d->poll_udp >= 0 && (fds[d->poll_udp].revents & POLLIN)) {
-        for (int i = 0; i < d->n_staged; i++)
-            tsnx_engine_udp(d->engine, &d->staged[i].src, d->staged[i].data, d->staged[i].len, tsnx_driver_now_ns());
-        if (!d->staged_all) udp_receive(d);
-        d->n_staged = 0;
-        d->staged_all = 0;
+        udp_receive(d);
         pump_engine(d);
     }
     for (int i = 0; i < d->poll_conns; i++) {

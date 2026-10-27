@@ -61,6 +61,11 @@ typedef struct {
 // Receives Taildrop files on `port` into `sink` (copied). Returns 0, or -1.
 int tsnx_driver_set_taildrop(TsnxDriver *d, const TsnxDropSink *sink, uint16_t port);
 
+// Whether the UDP socket is read a burst per call (Switch only): 1 yes, 0
+// not known yet, -1 no (*bsd_errno: the socket service's errno if a call
+// failed, else 0).
+int tsnx_driver_batched_receive(TsnxDriver *d, int *bsd_errno);
+
 // Most file descriptors the driver polls (connections + its UDP socket).
 #define TSNX_DRIVER_MAX_FDS 33
 
