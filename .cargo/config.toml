@@ -1,0 +1,4 @@
+# chacha20 0.9 uses its NEON backend only when asked; without this the
+# Switch encrypts and decrypts every WireGuard packet in portable code.
+[target.aarch64-nintendo-switch-freestanding]
+rustflags = ["--cfg", "chacha20_force_neon"]
