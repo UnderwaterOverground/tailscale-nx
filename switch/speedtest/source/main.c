@@ -221,30 +221,37 @@ static void calls(const char *ip) {
     printf("  per call: getsockopt %.0f us, recv (empty) %.0f us, send %d B %.0f us\n", opt, rcv, DGRAM, snd);
 }
 
-// SD card write speed by write size, as Taildrop's writes would see it.
-static void sd(void) {
-    static const size_t sizes[] = {4 << 10, 16 << 10, 64 << 10};
+// SD card write speed by write size, as Taildrop's writes would see it:
+// appending (each write extends the file), or into a file whose size was
+// set first.
+static void sd_write(size_t size, bool preallocate) {
     const size_t total = 16 << 20;
-    for (int i = 0; i < 3; i++) {
-        FILE *f = fopen("sdmc:/speedtest.tmp", "wb");
-        if (!f) {
-            printf("  cannot create sdmc:/speedtest.tmp\n");
-            return;
-        }
-        setvbuf(f, NULL, _IONBF, 0);
-        double t = now_s(), worst = 0;
-        for (size_t done = 0; done < total; done += sizes[i]) {
-            double w = now_s();
-            if (fwrite(g_buf, 1, sizes[i], f) != sizes[i]) break;
-            w = now_s() - w;
-            if (w > worst) worst = w;
-        }
-        fclose(f);
-        t = now_s() - t;
-        printf("  SD writes of %3zu KB: %5.1f Mbit/s (%.2f ms per write, worst %.0f ms)\n", sizes[i] >> 10,
-               total * 8 / t / 1e6, t * 1e3 / (total / sizes[i]), worst * 1e3);
-        remove("sdmc:/speedtest.tmp");
+    FILE *f = fopen("sdmc:/speedtest.tmp", "wb");
+    if (!f) {
+        printf("  cannot create sdmc:/speedtest.tmp\n");
+        return;
     }
+    setvbuf(f, NULL, _IONBF, 0);
+    double t = now_s(), worst = 0;
+    if (preallocate && ftruncate(fileno(f), total) != 0) printf("  ftruncate failed: %d\n", errno);
+    for (size_t done = 0; done < total; done += size) {
+        double w = now_s();
+        if (fwrite(g_buf, 1, size, f) != size) break;
+        w = now_s() - w;
+        if (w > worst) worst = w;
+    }
+    fclose(f);
+    t = now_s() - t;
+    printf("  SD writes of %3zu KB%s: %5.1f Mbit/s (%.2f ms per write, worst %.0f ms)\n", size >> 10,
+           preallocate ? ", preallocated" : "", total * 8 / t / 1e6, t * 1e3 / (total / size), worst * 1e3);
+    remove("sdmc:/speedtest.tmp");
+}
+
+static void sd(void) {
+    sd_write(4 << 10, false);
+    sd_write(16 << 10, false);
+    sd_write(64 << 10, false);
+    sd_write(16 << 10, true);
 }
 
 static const int RATES[] = {10, 15, 20, 25, 30, 35, 40, 50, 60, 80, 100};
