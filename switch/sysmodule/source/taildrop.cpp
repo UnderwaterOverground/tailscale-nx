@@ -47,7 +47,11 @@ namespace ams::taildrop {
             if (g_open) return nullptr;
             static_cast<void>(fs::DeleteFile(path));
             const int option = size != UINT64_MAX && size >= BigFileFrom ? fs::CreateOption_BigFile : 0;
-            if (R_FAILED(fs::CreateFile(path, 0, option))) return nullptr;
+            // Full size up front when the sender says it: growing the file
+            // write by write makes FAT allocate as it goes, which on the
+            // console halved the speed of 16 KB writes (22 vs 56 Mbit/s).
+            const s64 initial = size != UINT64_MAX ? static_cast<s64>(size) : 0;
+            if (R_FAILED(fs::CreateFile(path, initial, option))) return nullptr;
             if (R_FAILED(fs::OpenFile(std::addressof(g_file), path, fs::OpenMode_Write | fs::OpenMode_AllowAppend))) {
                 static_cast<void>(fs::DeleteFile(path));
                 return nullptr;
