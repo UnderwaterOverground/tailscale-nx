@@ -69,6 +69,22 @@ fn tcp_buffer_size(free: usize, max: usize) -> usize {
     (1usize << (usize::BITS - 1 - tenth.leading_zeros())).clamp(TCP_MIN, max)
 }
 
+/// Zero bytes: `len` of them, or half as many and so on down to TCP_MIN
+/// when the allocator can't provide that many in one piece.
+fn zeroed_up_to(mut len: usize) -> Option<Vec<u8>> {
+    loop {
+        let mut v = Vec::new();
+        if v.try_reserve_exact(len).is_ok() {
+            v.resize(len, 0);
+            return Some(v);
+        }
+        if len / 2 < TCP_MIN {
+            return None;
+        }
+        len /= 2;
+    }
+}
+
 const EPHEMERAL_PORTS: core::ops::RangeInclusive<u16> = 49152..=65535;
 
 pub type SockId = u32;
@@ -498,11 +514,15 @@ impl Netstack {
             return Err(NetError::NoBuffers);
         }
         let free = self.budget - self.used;
-        let (rx_size, tx_size) = (tcp_buffer_size(free, TCP_RX), tcp_buffer_size(free, TCP_TX));
-        self.used += rx_size + tx_size;
-        let rx = tcp::SocketBuffer::new(vec![0u8; rx_size]);
-        let tx = tcp::SocketBuffer::new(vec![0u8; tx_size]);
-        let mut sock = tcp::Socket::new(rx, tx);
+        // The budget doesn't see fragmentation: on the Switch's fixed heap a
+        // buffer can fail to fit with budget to spare. Take smaller ones
+        // then (a smaller window, a slower connection), and refuse the socket
+        // only below TCP_MIN, rather than abort.
+        let (Some(rx), Some(tx)) = (zeroed_up_to(tcp_buffer_size(free, TCP_RX)), zeroed_up_to(tcp_buffer_size(free, TCP_TX))) else {
+            return Err(NetError::NoBuffers);
+        };
+        self.used += rx.len() + tx.len();
+        let mut sock = tcp::Socket::new(tcp::SocketBuffer::new(rx), tcp::SocketBuffer::new(tx));
         sock.set_nagle_enabled(false);
         sock.set_keep_alive(Some(smoltcp::time::Duration::from_secs(30)));
         Ok(self.sockets.add(sock))
