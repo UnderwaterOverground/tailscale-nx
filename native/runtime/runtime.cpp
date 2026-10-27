@@ -235,6 +235,8 @@ void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick) {
     InternalScope internal;  // this thread only ever does engine work
     pollfd fds[TSNX_DRIVER_MAX_FDS + 1];
     std::unique_lock<std::mutex> lock(mu_);
+    constexpr uint64_t kTickEveryNs = 50'000'000;
+    uint64_t last_tick = 0;
     while (!stop_) {
         suspend_reasons_ |= async_suspend_.exchange(0);
         ApplyRequests();
@@ -265,7 +267,14 @@ void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick) {
             cv_.notify_all();
             continue;
         }
-        if (on_tick && *on_tick) (*on_tick)(driver_);
+        // Housekeeping at most every kTickEveryNs: under load the loop runs
+        // hundreds of rounds a second, and the embedder's tick (status,
+        // logs, heap stats) would hold the lock through every one.
+        const uint64_t tick_now = tsnx_driver_now_ns();
+        if (on_tick && *on_tick && tick_now - last_tick >= kTickEveryNs) {
+            last_tick = tick_now;
+            (*on_tick)(driver_);
+        }
         int wait = 0;
         int n = tsnx_driver_prepare(driver_, fds, TSNX_DRIVER_MAX_FDS, 1000, &wait);
         fds[n].fd = wake_rx_;

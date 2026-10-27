@@ -53,8 +53,9 @@ public:
     // caller then runs Run() on a thread of its own. Events go to the
     // callback the caller gave tsnx_driver_new.
     static std::unique_ptr<Runtime> Adopt(TsnxEngine *engine, TsnxDriver *driver, std::string *error);
-    // The engine loop, for Adopt()ed runtimes. on_tick runs at least once a
-    // second with the lock held (it may use the driver). Returns after Stop().
+    // The engine loop, for Adopt()ed runtimes. on_tick runs with the lock held
+    // (it may use the driver), at least once a second and at most every 50 ms.
+    // Returns after Stop().
     void Run(const std::function<void(TsnxDriver *)> &on_tick);
     void Stop();
 
