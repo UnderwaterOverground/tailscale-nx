@@ -80,7 +80,9 @@ void tsnx_driver_dispatch(TsnxDriver *d, const struct pollfd *fds);
 // Optional, between poll and dispatch, on the thread that dispatches: reads
 // datagrams the poll reported into the driver's own buffers. It touches no
 // engine state, so a caller that serializes engine access can run it
-// without that lock and hold the lock for less time.
+// without that lock and hold the lock for less time. The dispatch after it
+// then hands over only those (up to 16) and reads no more: a busy socket
+// stays readable, and the next round's prefetch reads the rest.
 void tsnx_driver_prefetch(TsnxDriver *d, const struct pollfd *fds);
 
 // Performs engine I/O queued since the last call (e.g. after overlay socket

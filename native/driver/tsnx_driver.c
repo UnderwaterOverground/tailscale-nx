@@ -79,6 +79,7 @@ struct TsnxDriver {
         TsnxAddr src;
     } staged[UDP_STAGED];
     int n_staged, staged_all;  // staged_all: the socket was drained
+    int prefetched;            // staged by tsnx_driver_prefetch, without the caller's lock
     // Batched receive (Switch): 1 works, 0 not known yet, -1 off (and the
     // socket service's errno, if a call failed); misses: batches that came
     // back empty while recvfrom then found a datagram.
@@ -419,6 +420,7 @@ static int stage(TsnxDriver *d) {
 void tsnx_driver_prefetch(TsnxDriver *d, const struct pollfd *fds) {
     d->n_staged = 0;
     d->staged_all = 0;
+    d->prefetched = 1;
     if (d->poll_udp < 0 || !(fds[d->poll_udp].revents & POLLIN)) return;
     STEP("UDP prefetch");
     d->n_staged = stage(d);
@@ -427,8 +429,14 @@ void tsnx_driver_prefetch(TsnxDriver *d, const struct pollfd *fds) {
 
 // Hands the staged datagrams to the engine, then reads and hands over more
 // until the socket is drained (or UDP_RECV_BATCH, so it can't hold the loop).
+// After a prefetch it reads no more: the caller holds its lock now, and an
+// app reading what we deliver would wait out every read. A video frame
+// arrives as a burst of datagrams, and delivered all at once it overflows
+// the app's socket queue; the rest is read by the next round's prefetch.
 static void udp_receive(TsnxDriver *d) {
     int handled = 0;
+    const int prefetched = d->prefetched;
+    d->prefetched = 0;
     for (;;) {
         for (int i = 0; i < d->n_staged; i++)
             tsnx_engine_udp(d->engine, &d->staged[i].src, d->staged[i].data, d->staged[i].len, tsnx_driver_now_ns());
@@ -436,7 +444,7 @@ static void udp_receive(TsnxDriver *d) {
         const int drained = d->staged_all;
         d->n_staged = 0;
         d->staged_all = 0;
-        if (drained || handled >= UDP_RECV_BATCH) return;
+        if (drained || prefetched || handled >= UDP_RECV_BATCH) return;
         STEP("UDP receive");
         d->n_staged = stage(d);
         d->staged_all = d->n_staged < UDP_STAGED;
