@@ -264,9 +264,12 @@ sockets use more of that heap, up to the `overlay_budget_kb` limit.
     figure those crashes depend on. Other overlays, such as Sysmodules, may
     show a higher figure: they count unused memory instead.
 - At boot tailscale-nx starts before most other sysmodules, so it can't
-  tell yet how much they will leave. Started later from the overlay, it
-  can: if less than 1 MB would be left, it doesn't start, and the overlay
-  and the log say why.
+  tell yet how much they will leave. It watches for the first two minutes:
+  if less than 512 KB was ever free, it says so in a notification (with
+  Ultrahand) and in the log, and the overlay's memory line turns red while
+  free memory stays that low.
+- Started later from the overlay, it can tell: if less than 1 MB would be
+  left, it doesn't start, and the overlay and the log say why.
 
 ## Troubleshooting
 

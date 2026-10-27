@@ -75,7 +75,7 @@ namespace ams {
         // starts some modules on demand, and they fail without it.
         constexpr u64 MinSystemFree = 1_MB;
         // How long after our start to watch the system's free memory (boot
-        // and the HOME menu starting), for the log.
+        // and the HOME menu starting), for the log and a low-memory warning.
         constexpr u64 BootLowWindowNs = 120'000'000'000ull;
         constexpr const char CrashedPath[] = "sdmc:/config/tailscale-nx/crashed";
         constexpr const char StartingPath[] = "sdmc:/config/tailscale-nx/starting";
@@ -501,6 +501,15 @@ namespace ams {
                 Log("update check: interrupted; trying again after resuming");
             }
             g_update_check_at_ns = 0;
+        }
+
+        // Free system memory through boot; too little left gets a warning
+        // in the log and a toast.
+        void WatchBootMemory(u64 now_ns) {
+            u64 low = 0;
+            if (!memory::SampleBootLow(now_ns, BootLowWindowNs, &low) || low >= TSNX_CTL_LOW_SYSTEM_FREE_KB * 1024ull) return;
+            Log("WARN memory: under %u KB free: modules started later can fail (2001-0132)", TSNX_CTL_LOW_SYSTEM_FREE_KB);
+            status::AnnounceLowMemory(static_cast<u32>(low / 1024));
         }
 
         const char *EventName(u32 kind) {
@@ -1008,7 +1017,7 @@ namespace ams {
         if (!NetworkUp()) {
             Log("waiting for the network");
             while (!NetworkUp()) {
-                memory::SampleBootLow(armTicksToNs(armGetSystemTick()), BootLowWindowNs);
+                WatchBootMemory(armTicksToNs(armGetSystemTick()));
                 os::SleepThread(TimeSpan::FromMilliSeconds(100));
             }
         }
@@ -1135,7 +1144,7 @@ namespace ams {
         os::SetThreadCoreMask(os::GetCurrentThread(), bsd_mitm::PreferredCore, bsd_mitm::EngineCores);
         rt->Run([&](TsnxDriver *d) {
             const u64 now = armTicksToNs(armGetSystemTick());
-            memory::SampleBootLow(now, BootLowWindowNs);
+            WatchBootMemory(now);
             // A round takes at most about a second (the poll timeout).
             if (g_last_round_ns && now - g_last_round_ns > 3'000'000'000ull) {
                 Log("engine loop stalled: %llu ms since the last round", static_cast<unsigned long long>((now - g_last_round_ns) / 1'000'000));

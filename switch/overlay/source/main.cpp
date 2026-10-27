@@ -710,7 +710,8 @@ namespace {
             char mem[96];
             std::snprintf(mem, sizeof mem, "Memory: %u.%u MB. System free: %u.%u MB.", g_status.memory_kb / 1024,
                           g_status.memory_kb % 1024 * 10 / 1024, g_status.system_free_kb / 1024, g_status.system_free_kb % 1024 * 10 / 1024);
-            line(mem, Grey);
+            // Little left for other modules: say so (it can crash the console).
+            line(mem, g_status.system_free_kb < TSNX_CTL_LOW_SYSTEM_FREE_KB ? Red : Grey);
         }
     }
 

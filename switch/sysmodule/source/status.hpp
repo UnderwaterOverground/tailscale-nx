@@ -22,6 +22,8 @@ namespace ams::status {
 
     // A newer release (version without the "v") is out: a toast saying so.
     void AnnounceUpdate(const char *latest);
+    // Little system memory was left free during boot: a toast saying so.
+    void AnnounceLowMemory(u32 free_kb);
 
     // The engine loop ran a round (engine thread); GetStatus reports how
     // long ago, so a stuck engine shows as such in the overlay.

@@ -21,6 +21,7 @@ namespace ams::status {
         constexpr const char NotifyPath[] = "sdmc:/config/ultrahand/notifications/tailscale-nx-login.notify";
         constexpr const char ConnectedNotifyPath[] = "sdmc:/config/ultrahand/notifications/tailscale-nx-connected.notify";
         constexpr const char UpdateNotifyPath[] = "sdmc:/config/ultrahand/notifications/tailscale-nx-update.notify";
+        constexpr const char MemoryNotifyPath[] = "sdmc:/config/ultrahand/notifications/tailscale-nx-memory.notify";
         // The overlay's "Connection notice" switch: present = off.
         constexpr const char NoNoticePath[] = "sdmc:/config/tailscale-nx/no-connect-notice";
         constexpr const char UltrahandConfig[] = "sdmc:/config/ultrahand/config.ini";
@@ -117,24 +118,32 @@ namespace ams::status {
             WriteFile(NotifyPath, json, static_cast<size_t>(m));
         }
 
+        // A short toast, if Ultrahand is installed. `text` is JSON string
+        // content already.
+        void Toast(const char *path, const char *title, const char *text, u32 duration_ms) {
+            if (!Exists(NotifyDir, fs::DirectoryEntryType_Directory)) return;
+            static char json[256];
+            const int n = util::SNPrintf(json, sizeof json,
+                                         "{\n"
+                                         "    \"title\": \"%s\",\n"
+                                         "    \"text\": \"%s\",\n"
+                                         "    \"font_size\": 18,\n"
+                                         "    \"duration\": %u,\n"
+                                         "    \"priority\": 10\n"
+                                         "}\n",
+                                         title, text, static_cast<unsigned>(duration_ms));
+            WriteFile(path, json, static_cast<size_t>(n));
+        }
+
         // First connection since boot: a short toast with our address. Not on
         // later reconnects (every wake would show it).
         void AnnounceConnected() {
             if (g_announced_connected || g_status.state != TSNX_CTL_CONNECTED) return;
             g_announced_connected = true;
             if (!g_connect_notice || Exists(NoNoticePath, fs::DirectoryEntryType_File)) return;
-            if (!Exists(NotifyDir, fs::DirectoryEntryType_Directory)) return;
-            static char json[256];
-            const int n = util::SNPrintf(json, sizeof json,
-                                         "{\n"
-                                         "    \"title\": \"Tailscale\",\n"
-                                         "    \"text\": \"Connected. IP: %u.%u.%u.%u\",\n"
-                                         "    \"font_size\": 18,\n"
-                                         "    \"duration\": 5000,\n"
-                                         "    \"priority\": 10\n"
-                                         "}\n",
-                                         g_status.ipv4[0], g_status.ipv4[1], g_status.ipv4[2], g_status.ipv4[3]);
-            WriteFile(ConnectedNotifyPath, json, static_cast<size_t>(n));
+            char text[48];
+            util::SNPrintf(text, sizeof text, "Connected. IP: %u.%u.%u.%u", g_status.ipv4[0], g_status.ipv4[1], g_status.ipv4[2], g_status.ipv4[3]);
+            Toast(ConnectedNotifyPath, "Tailscale", text, 5000);
         }
 
         // `src` as JSON string content, at most `max` bytes of it (cut at a
@@ -271,18 +280,16 @@ namespace ams::status {
     }
 
     void AnnounceUpdate(const char *latest) {
-        if (!Exists(NotifyDir, fs::DirectoryEntryType_Directory)) return;
-        static char json[256];
-        const int n = util::SNPrintf(json, sizeof json,
-                                     "{\n"
-                                     "    \"title\": \"Tailscale: update available\",\n"
-                                     "    \"text\": \"tailscale-nx %s is out (you have %s).\",\n"
-                                     "    \"font_size\": 18,\n"
-                                     "    \"duration\": 10000,\n"
-                                     "    \"priority\": 10\n"
-                                     "}\n",
-                                     latest, tsnx_version());
-        WriteFile(UpdateNotifyPath, json, static_cast<size_t>(n));
+        char text[96];
+        util::SNPrintf(text, sizeof text, "tailscale-nx %s is out (you have %s).", latest, tsnx_version());
+        Toast(UpdateNotifyPath, "Tailscale: update available", text, 10000);
+    }
+
+    void AnnounceLowMemory(u32 free_kb) {
+        char text[128];
+        util::SNPrintf(text, sizeof text, "Only %u KB was free after boot. If the Switch crashes (2001-0132), turn off a sysmodule.",
+                       static_cast<unsigned>(free_kb));
+        Toast(MemoryNotifyPath, "Tailscale: low system memory", text, 10000);
     }
 
     TsnxCtlStatus Get() {

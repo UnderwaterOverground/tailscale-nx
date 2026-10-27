@@ -21,6 +21,9 @@
 #define TSNX_CTL_SERVICE "tsnx:ctl"
 #define TSNX_CTL_VERSION 3
 #define TSNX_CTL_MAX_PEERS 32
+// Free system memory below this is a warning: the next module to start
+// (Nintendo's included) can fail to, and the console crashes (2001-0132).
+#define TSNX_CTL_LOW_SYSTEM_FREE_KB 512
 
 enum {
     TSNX_CTL_STARTING = 0,     // waiting for the network / starting up

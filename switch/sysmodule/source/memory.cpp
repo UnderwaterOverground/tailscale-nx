@@ -24,10 +24,10 @@ namespace ams::memory {
         return true;
     }
 
-    void SampleBootLow(u64 now_ns, u64 after_ns) {
+    bool SampleBootLow(u64 now_ns, u64 after_ns, u64 *low_bytes) {
         static u64 first = 0, low = UINT64_MAX;
         static bool done = false;
-        if (done) return;
+        if (done) return false;
         if (!first) first = now_ns;
         u64 free_bytes = 0, total = 0;
         if (SystemPool(&free_bytes, &total)) low = std::min(low, free_bytes);
@@ -35,7 +35,10 @@ namespace ams::memory {
             done = true;
             Log("memory: least free system memory in the %lu s after we started: %lu KB", static_cast<unsigned long>(after_ns / 1'000'000'000ull),
                 static_cast<unsigned long>(low / 1024));
+            *low_bytes = low;
+            return true;
         }
+        return false;
     }
 
 }
