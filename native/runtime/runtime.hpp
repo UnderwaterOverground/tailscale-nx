@@ -109,6 +109,17 @@ public:
         }
     }
 
+    // Like With, for calls that only read engine state (readiness, taking a
+    // queued datagram): nothing for the engine to send afterwards, so no
+    // pump and no wake-up.
+    template <class F>
+    auto Read(F &&f) -> decltype(f(static_cast<TsnxEngine *>(nullptr))) {
+        if (loop_wants_lock_.load(std::memory_order_acquire)) WaitForLoop();
+        std::unique_lock<std::mutex> lock(mu_);
+        InternalScope internal;
+        return f(engine_);
+    }
+
     // Blocks until ready(engine) returns true or the deadline passes
     // (nullptr = no deadline). Returns ready()'s final value.
     bool WaitFor(const std::function<bool(TsnxEngine *)> &ready, const Clock::time_point *deadline);

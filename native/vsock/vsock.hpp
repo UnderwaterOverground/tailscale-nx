@@ -146,7 +146,6 @@ private:
     bool WaitEngine(int32_t id, uint32_t mask, int timeout_ms);
     // rt_.WaitFor in slices, stopping early if the caller is no longer alive.
     bool WaitSliced(const std::function<bool(TsnxEngine *)> &ready, const Runtime::Clock::time_point *deadline);
-    uint32_t VirtualRevents(const VFd &v, short events);
 
     Backend &real_;
     Runtime &rt_;

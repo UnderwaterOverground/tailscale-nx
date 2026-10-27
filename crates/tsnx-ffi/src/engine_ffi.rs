@@ -425,7 +425,9 @@ pub unsafe extern "C" fn tsnx_net_udp_recvfrom(
     src: *mut TsnxAddr,
 ) -> i32 {
     let buf = core::slice::from_raw_parts_mut(buf, len);
-    with_net(e, |n| match n.udp_recv_from(id as u32, buf) {
+    // Only takes a queued datagram: nothing for the engine to send, so no
+    // flush (a datagram read per video packet made it a hot path).
+    match (*e).engine.net().udp_recv_from(id as u32, buf) {
         Ok((got, from)) => {
             if !src.is_null() {
                 *src = from_sockaddr(from);
@@ -433,7 +435,7 @@ pub unsafe extern "C" fn tsnx_net_udp_recvfrom(
             got as i32
         }
         Err(x) => err(x),
-    })
+    }
 }
 
 pub const TSNX_READABLE: u32 = 1;

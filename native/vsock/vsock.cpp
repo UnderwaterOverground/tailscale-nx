@@ -491,7 +491,7 @@ Result VSock::RecvFrom(int fd, void *buf, size_t len, int flags, sockaddr *from,
     auto deadline = DeadlineFrom(v.rcv_timeout_ms >= 0 ? v.rcv_timeout_ms : 0);
     for (;;) {
         TsnxAddr src{};
-        int32_t n = rt_.With([&](TsnxEngine *e) {
+        int32_t n = rt_.Read([&](TsnxEngine *e) {
             return tsnx_net_udp_recvfrom(e, v.udp, static_cast<uint8_t *>(buf), len, &src);
         });
         if (n >= 0) {
@@ -538,10 +538,6 @@ static uint32_t EngineRevents(TsnxEngine *e, int32_t tcp, int32_t listen, int32_
     return out;
 }
 
-uint32_t VSock::VirtualRevents(const VFd &v, short events) {
-    return rt_.With([&](TsnxEngine *e) { return EngineRevents(e, v.tcp, v.listen, v.udp, v.connecting, events); });
-}
-
 Result VSock::Poll(pollfd *fds, nfds_t n, int timeout_ms) {
     std::vector<VFd> state(n);
     std::vector<bool> virt(n), real_side(n);
@@ -564,10 +560,12 @@ Result VSock::Poll(pollfd *fds, nfds_t n, int timeout_ms) {
     std::vector<pollfd> realfds(fds, fds + n);
     for (;;) {
         int ready = 0;
-        for (nfds_t i = 0; i < n; i++) {
-            fds[i].revents = 0;
-            if (virt[i]) fds[i].revents = static_cast<short>(VirtualRevents(state[i], fds[i].events));
-        }
+        rt_.Read([&](TsnxEngine *e) {
+            for (nfds_t i = 0; i < n; i++) {
+                const VFd &v = state[i];
+                fds[i].revents = virt[i] ? static_cast<short>(EngineRevents(e, v.tcp, v.listen, v.udp, v.connecting, fds[i].events)) : 0;
+            }
+        });
         // Real side: a non-blocking check, or a short slice when nothing is
         // ready yet (mixed sets can't sleep on both sides at once).
         int slice = 0;
