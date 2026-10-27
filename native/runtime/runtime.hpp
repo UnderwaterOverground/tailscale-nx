@@ -91,6 +91,12 @@ public:
     // Runs f(engine) with exclusive access, then performs the I/O it queued.
     template <class F>
     auto With(F &&f) -> decltype(f(static_cast<TsnxEngine *>(nullptr))) {
+        // The loop first: a caller making call after call would otherwise
+        // take the lock back before the loop thread runs, and the engine's
+        // own socket (incoming datagrams, replies) would go unread. Callers
+        // block rather than spin: spinning threads can starve the socket
+        // service the lock holder is waiting on.
+        if (loop_wants_lock_.load(std::memory_order_acquire)) WaitForLoop();
         std::unique_lock<std::mutex> lock(mu_);
         InternalScope internal;
         if constexpr (std::is_void_v<decltype(f(engine_))>) {
@@ -148,6 +154,12 @@ private:
     // waits at most (tsnx_driver_now_ns).
     bool polling_ = false;
     uint64_t poll_until_ns_ = 0;
+    // Set (under gate_mu_) while the loop, back from poll(), waits for the
+    // lock; callers wait on gate_cv_ until it has it.
+    std::atomic<bool> loop_wants_lock_{false};
+    std::mutex gate_mu_;
+    std::condition_variable gate_cv_;
+    void WaitForLoop();
     std::unique_ptr<TsnxDropDir> drop_;  // Taildrop folder state (Start())
 };
 

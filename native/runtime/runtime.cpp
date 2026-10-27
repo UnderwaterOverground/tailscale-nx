@@ -213,6 +213,11 @@ void Runtime::ApplyRequests() {
     suspend_reasons_ = (suspend_reasons_ & ~asked) | (w & asked);
 }
 
+void Runtime::WaitForLoop() {
+    std::unique_lock<std::mutex> gate(gate_mu_);
+    gate_cv_.wait(gate, [&] { return !loop_wants_lock_.load(std::memory_order_acquire); });
+}
+
 bool Runtime::WaitFor(const std::function<bool(TsnxEngine *)> &ready, const Clock::time_point *deadline) {
     std::unique_lock<std::mutex> lock(mu_);
     for (;;) {
@@ -271,7 +276,16 @@ void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick) {
         poll_until_ns_ = tsnx_driver_now_ns() + static_cast<uint64_t>(wait) * 1000000;
         lock.unlock();
         int rc = poll(fds, static_cast<nfds_t>(nfds), wait);
+        {
+            std::lock_guard<std::mutex> gate(gate_mu_);
+            loop_wants_lock_.store(true, std::memory_order_release);
+        }
         lock.lock();
+        {
+            std::lock_guard<std::mutex> gate(gate_mu_);
+            loop_wants_lock_.store(false, std::memory_order_release);
+        }
+        gate_cv_.notify_all();
         polling_ = false;
         if (wake_rx_ >= 0 && (fds[n].revents & POLLIN)) {
             char buf[64];
