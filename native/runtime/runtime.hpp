@@ -55,8 +55,11 @@ public:
     static std::unique_ptr<Runtime> Adopt(TsnxEngine *engine, TsnxDriver *driver, std::string *error);
     // The engine loop, for Adopt()ed runtimes. on_tick runs with the lock held
     // (it may use the driver), at least once a second and at most every 50 ms.
+    // after_tick, if given, runs right after each on_tick on the same thread
+    // with the lock released, for slow work that doesn't touch the engine
+    // (files, other services), which would keep callers waiting.
     // Returns after Stop().
-    void Run(const std::function<void(TsnxDriver *)> &on_tick);
+    void Run(const std::function<void(TsnxDriver *)> &on_tick, const std::function<void()> &after_tick = nullptr);
     void Stop();
 
     // Suspend() has the loop close every socket the engine and the runtime
@@ -134,7 +137,7 @@ public:
 
 private:
     Runtime() = default;
-    void Loop(const std::function<void(TsnxDriver *)> *on_tick);
+    void Loop(const std::function<void(TsnxDriver *)> *on_tick, const std::function<void()> *after_tick);
     void AfterCall();
     void Wake();
 

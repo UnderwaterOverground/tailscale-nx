@@ -127,7 +127,7 @@ std::unique_ptr<Runtime> Runtime::Start(RuntimeConfig cfg, std::string *error) {
         *error = "cannot create wake sockets";
         return nullptr;
     }
-    rt->thread_ = std::thread([self] { self->Loop(nullptr); });
+    rt->thread_ = std::thread([self] { self->Loop(nullptr, nullptr); });
     return rt;
 }
 #endif
@@ -144,7 +144,9 @@ std::unique_ptr<Runtime> Runtime::Adopt(TsnxEngine *engine, TsnxDriver *driver, 
     return rt;
 }
 
-void Runtime::Run(const std::function<void(TsnxDriver *)> &on_tick) { Loop(&on_tick); }
+void Runtime::Run(const std::function<void(TsnxDriver *)> &on_tick, const std::function<void()> &after_tick) {
+    Loop(&on_tick, &after_tick);
+}
 
 void Runtime::Stop() {
     {
@@ -231,7 +233,7 @@ bool Runtime::WaitFor(const std::function<bool(TsnxEngine *)> &ready, const Cloc
     }
 }
 
-void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick) {
+void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick, const std::function<void()> *after_tick) {
     InternalScope internal;  // this thread only ever does engine work
     pollfd fds[TSNX_DRIVER_MAX_FDS + 1];
     std::unique_lock<std::mutex> lock(mu_);
@@ -271,9 +273,11 @@ void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick) {
         // hundreds of rounds a second, and the embedder's tick (status,
         // logs, heap stats) would hold the lock through every one.
         const uint64_t tick_now = tsnx_driver_now_ns();
+        bool ticked = false;
         if (on_tick && *on_tick && tick_now - last_tick >= kTickEveryNs) {
             last_tick = tick_now;
             (*on_tick)(driver_);
+            ticked = true;
         }
         int wait = 0;
         int n = tsnx_driver_prepare(driver_, fds, TSNX_DRIVER_MAX_FDS, 1000, &wait);
@@ -284,6 +288,7 @@ void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick) {
         polling_ = true;
         poll_until_ns_ = tsnx_driver_now_ns() + static_cast<uint64_t>(wait) * 1000000;
         lock.unlock();
+        if (ticked && after_tick && *after_tick) (*after_tick)();
         int rc = poll(fds, static_cast<nfds_t>(nfds), wait);
         // Socket reads without the lock: each is an IPC on the Switch, and
         // callers (an app reading video) would otherwise wait them out.
