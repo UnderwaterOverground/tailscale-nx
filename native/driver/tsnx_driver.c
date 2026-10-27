@@ -27,6 +27,9 @@ int tsnx_snprintf(char *dst, size_t size, const char *fmt, ...);
 // Datagrams read per readiness report: the rest wait for the next round, so
 // a socket that keeps "returning" something can't hold the loop.
 #define UDP_RECV_BATCH 64
+// Datagrams tsnx_driver_prefetch reads ahead (underlay datagrams fit a slot).
+#define UDP_STAGED 8
+#define UDP_SLOT 2048
 
 static const char *volatile g_step;
 #define STEP(s) (g_step = (s))
@@ -59,6 +62,13 @@ struct TsnxDriver {
     TsnxDropSink drop;
     uint32_t drop_id;  // transfer being written, 0 = none
     int in_drop;
+    // Datagrams read by tsnx_driver_prefetch, for dispatch to hand over.
+    struct {
+        uint8_t data[UDP_SLOT];
+        size_t len;
+        TsnxAddr src;
+    } staged[UDP_STAGED];
+    int n_staged, staged_all;  // staged_all: the socket was drained
 };
 
 uint64_t tsnx_driver_now_ns(void) {
@@ -224,17 +234,39 @@ static void udp_send(TsnxDriver *d, const TsnxAddr *to, const uint8_t *data, siz
     sendto(d->udp_fd, data, len, 0, (struct sockaddr *)&sin, sizeof sin);
 }
 
+// Reads one datagram into buf. Returns its length, or -1 when there's
+// nothing (more) to read.
+static ssize_t udp_read(TsnxDriver *d, uint8_t *buf, size_t cap, TsnxAddr *src) {
+    struct sockaddr_in from;
+    socklen_t flen = sizeof from;
+    memset(&from, 0, sizeof from);
+    ssize_t got = recvfrom(d->udp_fd, buf, cap, 0, (struct sockaddr *)&from, &flen);
+    if (got < 0 || from.sin_family != AF_INET) return -1;
+    to_tsnx_addr(&from, src);
+    return got;
+}
+
+void tsnx_driver_prefetch(TsnxDriver *d, const struct pollfd *fds) {
+    d->n_staged = 0;
+    d->staged_all = 0;
+    if (d->poll_udp < 0 || !(fds[d->poll_udp].revents & POLLIN)) return;
+    while (d->n_staged < UDP_STAGED) {
+        STEP("UDP prefetch");
+        ssize_t got = udp_read(d, d->staged[d->n_staged].data, UDP_SLOT, &d->staged[d->n_staged].src);
+        if (got < 0) {
+            d->staged_all = 1;
+            return;
+        }
+        d->staged[d->n_staged++].len = (size_t)got;
+    }
+}
+
 static void udp_receive(TsnxDriver *d) {
     for (int i = 0; i < UDP_RECV_BATCH; i++) {
         STEP("UDP receive");
-        struct sockaddr_in from;
-        socklen_t flen = sizeof from;
-        memset(&from, 0, sizeof from);
-        ssize_t got = recvfrom(d->udp_fd, d->rbuf, sizeof d->rbuf, 0, (struct sockaddr *)&from, &flen);
-        if (got < 0) return;
-        if (from.sin_family != AF_INET) return;  // nothing usable: try next round
         TsnxAddr src;
-        to_tsnx_addr(&from, &src);
+        ssize_t got = udp_read(d, d->rbuf, sizeof d->rbuf, &src);
+        if (got < 0) return;  // drained (or nothing usable: next round)
         tsnx_engine_udp(d->engine, &src, d->rbuf, (size_t)got, tsnx_driver_now_ns());
     }
 }
@@ -473,7 +505,11 @@ int tsnx_driver_poll_stale(TsnxDriver *d, uint64_t until_ns) {
 
 void tsnx_driver_dispatch(TsnxDriver *d, const struct pollfd *fds) {
     if (d->poll_udp >= 0 && (fds[d->poll_udp].revents & POLLIN)) {
-        udp_receive(d);
+        for (int i = 0; i < d->n_staged; i++)
+            tsnx_engine_udp(d->engine, &d->staged[i].src, d->staged[i].data, d->staged[i].len, tsnx_driver_now_ns());
+        if (!d->staged_all) udp_receive(d);
+        d->n_staged = 0;
+        d->staged_all = 0;
         pump_engine(d);
     }
     for (int i = 0; i < d->poll_conns; i++) {

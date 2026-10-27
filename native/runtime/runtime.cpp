@@ -276,6 +276,9 @@ void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick) {
         poll_until_ns_ = tsnx_driver_now_ns() + static_cast<uint64_t>(wait) * 1000000;
         lock.unlock();
         int rc = poll(fds, static_cast<nfds_t>(nfds), wait);
+        // Socket reads without the lock: each is an IPC on the Switch, and
+        // callers (an app reading video) would otherwise wait them out.
+        if (rc > 0) tsnx_driver_prefetch(driver_, fds);
         {
             std::lock_guard<std::mutex> gate(gate_mu_);
             loop_wants_lock_.store(true, std::memory_order_release);

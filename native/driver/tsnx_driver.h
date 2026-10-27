@@ -72,6 +72,12 @@ int tsnx_driver_set_taildrop(TsnxDriver *d, const TsnxDropSink *sink, uint16_t p
 int tsnx_driver_prepare(TsnxDriver *d, struct pollfd *fds, int cap, int max_wait_ms, int *wait_ms);
 void tsnx_driver_dispatch(TsnxDriver *d, const struct pollfd *fds);
 
+// Optional, between poll and dispatch, on the thread that dispatches: reads
+// datagrams the poll reported into the driver's own buffers. It touches no
+// engine state, so a caller that serializes engine access can run it
+// without that lock and hold the lock for less time.
+void tsnx_driver_prefetch(TsnxDriver *d, const struct pollfd *fds);
+
 // Performs engine I/O queued since the last call (e.g. after overlay socket
 // operations) without waiting.
 void tsnx_driver_pump(TsnxDriver *d);
