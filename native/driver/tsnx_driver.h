@@ -76,6 +76,13 @@ void tsnx_driver_dispatch(TsnxDriver *d, const struct pollfd *fds);
 // operations) without waiting.
 void tsnx_driver_pump(TsnxDriver *d);
 
+// After tsnx_driver_prepare: whether a poll it set up, which waits until
+// `until_ns` at the latest, no longer covers everything (a connection came
+// or went or now waits to send, or the engine's next deadline moved
+// earlier). Callers that wake a sleeping poll after engine calls only need
+// to when this is true.
+int tsnx_driver_poll_stale(TsnxDriver *d, uint64_t until_ns);
+
 // Performs pending engine I/O, waits up to max_wait_ms for sockets or the
 // engine's next deadline, and dispatches results. Returns 0, or -1 on a
 // fatal driver error.

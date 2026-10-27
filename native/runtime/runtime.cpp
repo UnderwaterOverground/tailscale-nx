@@ -175,7 +175,10 @@ void Runtime::Wake() {
 void Runtime::AfterCall() {
     if (suspended_) return;  // I/O resumes (and gets pumped) on Resume()
     tsnx_driver_pump(driver_);
-    Wake();
+    // A wake-up costs the loop a round of socket calls, and most calls (a
+    // datagram sent or read, a readiness check) leave its poll as good as
+    // it was. A loop that isn't in poll() prepares a new one anyway.
+    if (polling_ && tsnx_driver_poll_stale(driver_, poll_until_ns_)) Wake();
 }
 
 bool Runtime::Suspend(SuspendReason why, std::chrono::milliseconds timeout) {
@@ -264,9 +267,12 @@ void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick) {
         fds[n].events = POLLIN;
         fds[n].revents = 0;
         const int nfds = n + (wake_rx_ >= 0 ? 1 : 0);
+        polling_ = true;
+        poll_until_ns_ = tsnx_driver_now_ns() + static_cast<uint64_t>(wait) * 1000000;
         lock.unlock();
         int rc = poll(fds, static_cast<nfds_t>(nfds), wait);
         lock.lock();
+        polling_ = false;
         if (wake_rx_ >= 0 && (fds[n].revents & POLLIN)) {
             char buf[64];
             while (recv(wake_rx_, buf, sizeof buf, 0) > 0) {

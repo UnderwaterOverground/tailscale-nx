@@ -3,7 +3,8 @@
 // The engine and driver are not thread-safe; everything goes through one
 // mutex, which the engine thread drops only while blocked in poll(). Callers
 // that change engine state (overlay socket calls) get their I/O performed
-// immediately and wake the engine thread so new sockets join its poll set.
+// immediately and wake the engine thread when its poll set or next deadline
+// changed (e.g. a new connection to the control server).
 // Threads waiting for socket readiness block on a condition variable that
 // is signalled whenever the engine processed input.
 #pragma once
@@ -143,6 +144,10 @@ private:
     std::function<void()> on_suspend_, on_resume_;
     bool suspended_ = false;
     int wake_rx_ = -1, wake_tx_ = -1;
+    // While the loop is in poll() (it dropped the lock): until when it
+    // waits at most (tsnx_driver_now_ns).
+    bool polling_ = false;
+    uint64_t poll_until_ns_ = 0;
     std::unique_ptr<TsnxDropDir> drop_;  // Taildrop folder state (Start())
 };
 

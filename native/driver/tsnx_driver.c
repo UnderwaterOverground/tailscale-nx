@@ -53,7 +53,9 @@ struct TsnxDriver {
     // Bookkeeping between prepare and dispatch (slots can be reused mid-dispatch).
     Conn *poll_owners[MAX_CONNS];
     uint32_t poll_ids[MAX_CONNS];
-    int poll_conns, poll_udp;
+    short poll_events[MAX_CONNS];
+    int poll_conns, poll_udp, poll_udp_fd;
+    uint64_t poll_deadline;  // the engine's next deadline when prepared
     TsnxDropSink drop;
     uint32_t drop_id;  // transfer being written, 0 = none
     int in_drop;
@@ -72,6 +74,7 @@ TsnxDriver *tsnx_driver_new(TsnxEngine *engine, tsnx_event_fn on_event, void *ct
     d->on_event = on_event;
     d->ctx = ctx;
     d->udp_fd = -1;
+    d->poll_udp_fd = -1;
     for (int i = 0; i < MAX_CONNS; i++) d->conns[i].fd = -1;
     return d;
 }
@@ -409,6 +412,8 @@ static void pump_taildrop(TsnxDriver *d) {
 
 void tsnx_driver_pump(TsnxDriver *d) { pump_engine(d); }
 
+static short conn_events(const Conn *c) { return POLLIN | (c->connecting || c->wlen > 0 ? POLLOUT : 0); }
+
 int tsnx_driver_prepare(TsnxDriver *d, struct pollfd *fds, int cap, int max_wait_ms, int *wait_ms) {
     uint64_t now = tsnx_driver_now_ns();
     if (now >= tsnx_engine_next_deadline(d->engine)) tsnx_engine_timeout(d->engine, now);
@@ -419,23 +424,26 @@ int tsnx_driver_prepare(TsnxDriver *d, struct pollfd *fds, int cap, int max_wait
         Conn *c = &d->conns[i];
         if (!c->id) continue;
         fds[n].fd = c->fd;
-        fds[n].events = POLLIN;
-        if (c->connecting || c->wlen > 0) fds[n].events |= POLLOUT;
+        fds[n].events = conn_events(c);
         fds[n].revents = 0;
         d->poll_ids[n] = c->id;
+        d->poll_events[n] = fds[n].events;
         d->poll_owners[n++] = c;
     }
     d->poll_conns = n;
     // The UDP socket, if open, goes last.
     d->poll_udp = -1;
+    d->poll_udp_fd = -1;
     if (d->udp_fd >= 0 && n < cap) {
         d->poll_udp = n;
+        d->poll_udp_fd = d->udp_fd;
         fds[n].fd = d->udp_fd;
         fds[n].events = POLLIN;
         fds[n++].revents = 0;
     }
 
     uint64_t deadline = tsnx_engine_next_deadline(d->engine);
+    d->poll_deadline = deadline;
     now = tsnx_driver_now_ns();
     int wait = max_wait_ms;
     if (deadline <= now) {
@@ -445,6 +453,22 @@ int tsnx_driver_prepare(TsnxDriver *d, struct pollfd *fds, int cap, int max_wait
     }
     *wait_ms = wait;
     return n;
+}
+
+int tsnx_driver_poll_stale(TsnxDriver *d, uint64_t until_ns) {
+    int n = 0;
+    for (int i = 0; i < MAX_CONNS; i++) {
+        const Conn *c = &d->conns[i];
+        if (!c->id) continue;
+        if (n >= d->poll_conns || d->poll_owners[n] != c || d->poll_ids[n] != c->id || d->poll_events[n] != conn_events(c))
+            return 1;
+        n++;
+    }
+    if (n != d->poll_conns || d->udp_fd != d->poll_udp_fd) return 1;
+    // The poll's timeout is rounded up past the deadline it was set for, so
+    // only a deadline earlier than that one is news.
+    const uint64_t deadline = tsnx_engine_next_deadline(d->engine);
+    return deadline < d->poll_deadline && deadline < until_ns;
 }
 
 void tsnx_driver_dispatch(TsnxDriver *d, const struct pollfd *fds) {
