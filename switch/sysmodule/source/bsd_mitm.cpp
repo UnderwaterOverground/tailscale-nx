@@ -993,6 +993,7 @@ namespace ams::bsd_mitm {
                 if (i == 0) UninstallForExit();  // nobody would answer sm's queries
                 return i > 0;
             }
+            os::SetThreadCoreMask(g_threads + i, PreferredCore, EngineCores);
             os::SetThreadNamePointer(g_threads + i, "tsnx.BsdMitm");
             stack_watch::Add("mitm", g_threads + i);
             os::StartThread(g_threads + i);

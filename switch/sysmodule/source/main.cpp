@@ -1131,6 +1131,8 @@ namespace ams {
         bool healthy = false;
         size_t heap_all_peak = 0;
         int batched = 0;  // the driver's batched receive state, as last logged
+        // The engine loop runs on core 2 when it can (see bsd_mitm::EngineCores).
+        os::SetThreadCoreMask(os::GetCurrentThread(), bsd_mitm::PreferredCore, bsd_mitm::EngineCores);
         rt->Run([&](TsnxDriver *d) {
             const u64 now = armTicksToNs(armGetSystemTick());
             memory::SampleBootLow(now, BootLowWindowNs);
