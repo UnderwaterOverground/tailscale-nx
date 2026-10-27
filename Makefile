@@ -15,7 +15,7 @@ else
   SW := docker run --rm -v "$(CURDIR)":/src -v tsnx-cargo-registry:/opt/cargo/registry -e CARGO_TARGET_DIR=/src/target/switch -w /src $(DOCKER_IMAGE)
 endif
 
-.PHONY: drop-test publish release overlay mitm-test nxlink-mitm-test all host-test host-c e2e sysmodule libstratosphere docker-image rust-switch nro nxlink clean
+.PHONY: drop-test publish release overlay mitm-test nxlink-mitm-test speedtest nxlink-speedtest all host-test host-c e2e sysmodule libstratosphere docker-image rust-switch nro nxlink clean
 
 all: host-test nro
 
@@ -100,6 +100,17 @@ mitm-test:
 nxlink-mitm-test: mitm-test target/nxlink
 	@test -n "$(NXLINK_HOST)" -a -n "$(MITM_PEER)" || (echo "set NXLINK_HOST=<switch ip> MITM_PEER=<tailnet peer ip>" && false)
 	script -q target/nxlink-mitm.log target/nxlink -a $(NXLINK_HOST) -s switch/mitm-test/mitm-test.nro $(MITM_PEER) $(MITM_PASSTHROUGH)
+
+# Throughput (TCP/UDP each way), per-call socket costs, SD card writes and the
+# crypto benchmark, as plain homebrew through the MITM. Run
+# tools/speedtest-server.py on a wired machine and give it both of that
+# machine's addresses (LAN, then tailnet): SPEEDTEST_SERVERS="<lan ip> <tailnet ip>".
+speedtest: rust-switch
+	$(SW) make -C switch/speedtest
+
+nxlink-speedtest: speedtest target/nxlink
+	@test -n "$(NXLINK_HOST)" -a -n "$(SPEEDTEST_SERVERS)" || (echo "set NXLINK_HOST=<switch ip> SPEEDTEST_SERVERS=\"<lan ip> <tailnet ip>\"" && false)
+	script -q target/nxlink-speedtest.log target/nxlink -a $(NXLINK_HOST) -s switch/speedtest/speedtest.nro $(SPEEDTEST_ARGS) $(SPEEDTEST_SERVERS)
 
 nxlink: nro target/nxlink
 	@test -n "$(NXLINK_HOST)" || (echo "set NXLINK_HOST=<switch ip>" && false)

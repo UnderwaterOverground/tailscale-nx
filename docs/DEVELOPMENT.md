@@ -18,6 +18,7 @@ machine, without a console), and what we learned along the way.
 | `switch/sysmodule` | The boot2 sysmodule (libstratosphere): engine, `bsd:u` MITM (plus `bsd:s` for sys-ftpd), MagicDNS hosts file, the `tsnx:ctl` status service, sleep handling and the crash guard |
 | `switch/overlay` | Tesla/Ultrahand overlay: status, pause switch, stop/start, login QR code |
 | `switch/app` | `tsnx-app.nro`: the engine in a homebrew app, with status, an echo self-test and a crypto benchmark (developer tool) |
+| `switch/speedtest` | `speedtest.nro`: throughput, socket call costs and SD card writes through the sysmodule, against `tools/speedtest-server.py` (developer tool) |
 | `third_party/tailscale-rs` | Vendored, `no_std`-ported crates from tailscale-rs (BSD-3). See `VENDORED.md`. |
 | `e2e/` | Local tailnet: headscale (control, DERP, STUN) plus a stock `tailscaled` peer with TCP/UDP echo (port 7), HTTP (8080) and iperf3 (5201). `run-tests.sh` is the automated suite. |
 
@@ -112,6 +113,22 @@ resolve them with `aarch64-none-elf-addr2line -e switch/sysmodule/tailscale-nx.e
 app with an echo self-test and a crypto benchmark (`make nxlink
 NXLINK_HOST=<switch ip>` streams its output). Don't run it alongside the
 sysmodule: they share node keys.
+
+`switch/speedtest` (`speedtest.nro`) measures what homebrew gets through
+the sysmodule: TCP and UDP throughput each way, the cost of single socket
+calls, SD card write speed and the crypto benchmark. Run
+`tools/speedtest-server.py` (port 5300, Python 3) on a wired machine that is
+also on the tailnet, then give the test both of its addresses, so each
+result has a LAN baseline next to it:
+
+```sh
+make nxlink-speedtest NXLINK_HOST=<switch ip> SPEEDTEST_SERVERS="<lan ip> <tailnet ip>"
+# only some tests: SPEEDTEST_ARGS=+sc (b crypto, s SD card, c call costs, t throughput)
+```
+
+Results on 1.1.3 (handheld on Wi-Fi, server on 2.5 GbE): LAN TCP about 42
+Mbit/s down and 50 up, tailnet TCP about 13 each way; UDP without loss up
+to 30 Mbit/s down and 50 up on the LAN, 15 and 25 over the tailnet.
 
 ### A complete SD card tree
 
