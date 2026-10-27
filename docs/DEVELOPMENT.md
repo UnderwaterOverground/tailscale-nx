@@ -123,7 +123,7 @@ result has a LAN baseline next to it:
 
 ```sh
 make nxlink-speedtest NXLINK_HOST=<switch ip> SPEEDTEST_SERVERS="<lan ip> <tailnet ip>"
-# only some tests: SPEEDTEST_ARGS=+sc (b crypto, s SD card, c call costs, t throughput)
+# only some tests: SPEEDTEST_ARGS=+sc (b crypto, s SD card, c call costs, t TCP, u UDP)
 ```
 
 Results on 1.1.3 (handheld on Wi-Fi, server on 2.5 GbE): LAN TCP about 42

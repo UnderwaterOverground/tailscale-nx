@@ -3,7 +3,7 @@
 // address, then its tailnet address), plus SD card write speed and the
 // engine's crypto benchmark. Output goes to nxlink.
 //
-//   nxlink -s speedtest.nro [+bsct] <server ip> [<server ip> ...]
+//   nxlink -s speedtest.nro [+bsctu] <server ip> [<server ip> ...]
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -256,11 +256,14 @@ static void sd(void) {
 
 static const int RATES[] = {10, 15, 20, 25, 30, 35, 40, 50, 60, 80, 100};
 
-static void throughput(const char *ip) {
+static void tcp(const char *ip) {
     tcp_down(ip);
     tcp_up(ip);
     tcp_down(ip);
     tcp_up(ip);
+}
+
+static void udp(const char *ip) {
     for (size_t r = 0; r < sizeof RATES / sizeof *RATES; r++)
         if (udp_down(ip, RATES[r]) > 20) break;
     for (size_t r = 0; r < sizeof RATES / sizeof *RATES; r++)
@@ -285,9 +288,9 @@ int main(int argc, char **argv) {
     }
     nxlinkStdio();
     appletSetMediaPlaybackState(true);  // no auto-sleep mid-test
-    // Tests: +b crypto, +s SD card, +c call costs, +t throughput (default all;
+    // Tests: +b crypto, +s SD card, +c call costs, +t TCP, +u UDP (default all;
     // not -b: nxlink would take that as its own option).
-    const char *tests = "bsct";
+    const char *tests = "bsctu";
     for (int i = 1; i < argc; i++)
         if (argv[i][0] == '+') tests = argv[i] + 1;
     printf("tailscale-nx speedtest, %d s per test\n", SECS);
@@ -303,7 +306,8 @@ int main(int argc, char **argv) {
         if (argv[i][0] == '+') continue;
         printf("\n%s:\n", argv[i]);
         if (strchr(tests, 'c')) calls(argv[i]);
-        if (strchr(tests, 't')) throughput(argv[i]);
+        if (strchr(tests, 't')) tcp(argv[i]);
+        if (strchr(tests, 'u')) udp(argv[i]);
     }
     printf("done\n");
     socketExit();
