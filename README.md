@@ -148,11 +148,10 @@ Streams are smoothest over a direct connection. While streaming, open the
 overlay's **Connections** page: "Direct" is best, and "via" a city means the
 stream is relayed through Tailscale's server there, which adds latency.
 
-Over a direct connection, a 720p 60 FPS stream stays smooth up to a bitrate
-of about 25 Mbit/s, and was tested to 27 with a worst-case picture. The
-Switch's Wi-Fi itself manages about 30 on a local network. Above that, a
-burst of lost packets can freeze the stream, with or without tailscale-nx:
-lower the bitrate in Moonlight's settings.
+Over a direct connection, streams stay smooth up to about 25 Mbit/s at 720p
+or 1080p, close to what the Switch's Wi-Fi manages on its own. If a stream
+stutters at a higher bitrate, turn it down in Moonlight's settings. Artemis
+picks 35 Mbit/s for 1080p, so lower it to around 25.
 
 ## Known limitations
 
@@ -186,10 +185,9 @@ stream.** That's a Moonlight-Switch bug
 happens with tailscale-nx turned off too. Until it's fixed, end the stream
 before putting the console to sleep.
 
-**Artemis shows a black screen when I start it again.** After a stream,
-Artemis can't start a second time from the same hbmenu session; it happens
-with tailscale-nx turned off too. Close the software from the HOME menu
-and open hbmenu again.
+**Artemis won't open a second time.** After a stream, Artemis can't start
+again from the same hbmenu session, with or without tailscale-nx. Close
+hbmenu from the HOME menu and open it again.
 
 **Is my traffic private?** Like the official Tailscale clients, tailnet
 traffic is encrypted end to end with WireGuard. Tailscale's servers
