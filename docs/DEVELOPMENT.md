@@ -75,7 +75,7 @@ The sysmodule's boot-time update check (`native/driver/tsnx_update.c`) runs
 the same way against the real GitHub. Pass the version to compare with:
 
 ```sh
-target/tsnx-c --update-check 1.0.0   # latest 1.1.3: newer
+target/tsnx-c --update-check 1.0.0   # latest 1.2.0: newer
 ```
 
 ### Running unmodified programs over the tailnet (the MITM's code paths)
@@ -126,9 +126,11 @@ make nxlink-speedtest NXLINK_HOST=<switch ip> SPEEDTEST_SERVERS="<lan ip> <tailn
 # only some tests: SPEEDTEST_ARGS=+sc (b crypto, s SD card, c call costs, t TCP, u UDP)
 ```
 
-Results on 1.1.3 (handheld on Wi-Fi, server on 2.5 GbE): LAN TCP about 42
-Mbit/s down and 50 up, tailnet TCP about 13 each way; UDP without loss up
-to 30 Mbit/s down and 50 up on the LAN, 15 and 25 over the tailnet.
+Results (handheld on Wi-Fi, server on 2.5 GbE): on the LAN, TCP about 42
+Mbit/s down and 50 up, and UDP without loss up to 30 Mbit/s down and 50 up.
+Over the tailnet on 1.2.0, UDP without loss up to 35 Mbit/s down (17% lost
+at 50) and about 37 up (15 and 25 on 1.1.3); TCP was about 13 each way on
+1.1.3.
 
 ### A complete SD card tree
 
