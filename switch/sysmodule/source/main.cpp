@@ -105,12 +105,20 @@ namespace ams {
         static_assert(MallocBufferSize % os::MemoryPageSize == 0);
         alignas(os::MemoryPageSize) constinit u8 g_malloc_buffer[MallocBufferSize];
 
-        // The engine's own sockets: control + DERP (TCP), WireGuard + DNS + log
-        // (UDP). The transfer memory is the buffer pool for all of them, and
-        // a UDP socket takes udp_tx + udp_rx of it, so it is sized for
-        // sb_efficiency sockets' worth.
+        // The engine's own sockets: control, DERP and the update check (TCP);
+        // WireGuard, DNS, the runtime's wake pair and the log (UDP). The
+        // transfer memory is the buffer pool for all of them: each socket's
+        // buffers are taken from it, and one that doesn't fit fails with
+        // ENOBUFS. UDP sockets start with a small receive buffer, as only
+        // WireGuard's needs to be big, and it grows its own
+        // (tsnx_driver.c): at 48 KB each, the small sockets took so much
+        // that once WireGuard had grown, a new DNS socket didn't fit, and
+        // after a pause or a wake the engine couldn't reach control. The
+        // pool keeps the size it had with 48 KB (sb_efficiency sockets'
+        // worth), so WireGuard gets what the small sockets no longer take.
+        constexpr u32 UdpRxPoolShare = 0xC000;
         consteval size_t BsdTransferMemorySize(const ::SocketInitConfig &c) {
-            const u32 sum = c.tcp_tx_buf_max_size + c.tcp_rx_buf_max_size + c.udp_tx_buf_size + c.udp_rx_buf_size;
+            const u32 sum = c.tcp_tx_buf_max_size + c.tcp_rx_buf_max_size + c.udp_tx_buf_size + UdpRxPoolShare;
             return static_cast<size_t>(c.sb_efficiency) * util::AlignUp(sum, os::MemoryPageSize);
         }
 
@@ -120,7 +128,7 @@ namespace ams {
             .tcp_tx_buf_max_size = 0x8000,
             .tcp_rx_buf_max_size = 0x8000,
             .udp_tx_buf_size = 0x2000,
-            .udp_rx_buf_size = 0xC000,
+            .udp_rx_buf_size = 0x2000,
             .sb_efficiency = 3,
             // Each counts against the socket service's session limit, which
             // every process shares: two cover the engine's long poll plus

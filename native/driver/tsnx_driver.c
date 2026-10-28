@@ -216,16 +216,20 @@ void tsnx_driver_refresh_endpoints(TsnxDriver *d) {
     tsnx_engine_set_local_endpoints(d->engine, &ep, n, tsnx_driver_now_ns());
 }
 
-// The Switch's socket service gives a UDP socket 48 KB of receive buffer,
-// about one video frame's burst of datagrams, and drops what arrives while
-// it's full before we can read it: under a 15.5 Mbit/s Artemis stream that
-// was 1-12% of packets. Ask for more, as much as it allows (a little over
-// 160 KB). It only lets this socket hold more of the buffer pool, which is
-// our own transfer memory, not new memory.
+// The socket service drops datagrams that arrive while a socket's receive
+// buffer is full, before we can read them: at 48 KB, about one video
+// frame's burst, that was 1-12% of packets under a 15.5 Mbit/s Artemis
+// stream. The buffer comes out of our socket pool (main.cpp), not new
+// memory, but every other socket needs room in it too: with control and
+// DERP connected, 160 KB leaves 88 KB for a DNS socket and the update
+// check's connection (a new socket that doesn't fit fails with ENOBUFS).
+// More would lose less still (under a 28 Mbit/s stream, 160 KB lost up to
+// 8% in bursts and 240 KB almost nothing), but would leave no room for
+// those.
 #define UDP_RCVBUF (160 * 1024)
 
 static void grow_rcvbuf(int fd) {
-    for (int size = UDP_RCVBUF; size > 48 * 1024; size -= 32 * 1024) {
+    for (int size = UDP_RCVBUF; size >= 32 * 1024; size -= 32 * 1024) {
         int got = 0;
         socklen_t len = sizeof got;
         if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof size) == 0 &&
