@@ -148,10 +148,16 @@ Streams are smoothest over a direct connection. While streaming, open the
 overlay's **Connections** page: "Direct" is best, and "via" a city means the
 stream is relayed through Tailscale's server there, which adds latency.
 
-Over a direct connection, streams stay smooth up to about 25 Mbit/s at 720p
-or 1080p, close to what the Switch's Wi-Fi manages on its own. If a stream
-stutters at a higher bitrate, turn it down in Moonlight's settings. Artemis
-picks 35 Mbit/s for 1080p, so lower it to around 25.
+Our testing found these bitrates safe over a direct connection, at 60 FPS
+with a worst-case picture (full-screen moving noise):
+
+| Resolution | Bitrate |
+|---|---|
+| 720p | up to 25 Mbit/s |
+| 1080p | up to 20 Mbit/s |
+
+Set the bitrate in Moonlight's settings. Artemis picks 35 Mbit/s for 1080p,
+so lower it to 20.
 
 ## Known limitations
 

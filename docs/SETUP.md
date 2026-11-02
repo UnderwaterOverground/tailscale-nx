@@ -300,6 +300,9 @@ sockets use more of that heap, up to the `overlay_budget_kb` limit.
     "via" a city, the stream is relayed. Some networks (hotel and mobile
     ones especially) block direct connections; a direct path is often found
     a few seconds after the stream starts.
+  - Check Moonlight's bitrate is within the
+    [limits we found safe](../README.md#using-it-with-moonlight): 25 Mbit/s
+    at 720p, 20 at 1080p.
 - **Moonlight finds the PC at home but not away.**
   - Check that Moonlight's saved host includes the tailnet name or `100.x`
     address, and that the overlay shows **Connected**.

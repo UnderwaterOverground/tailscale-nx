@@ -132,6 +132,24 @@ Over the tailnet on 1.2.0, UDP without loss up to 35 Mbit/s down (17% lost
 at 50) and about 37 up (15 and 25 on 1.1.3); TCP was about 13 each way on
 1.1.3.
 
+### Moonlight stream test
+
+The bitrate limits in the README come from streaming the hardest picture
+there is for a video encoder, full-screen moving noise, from Sunshine to
+Artemis for two minutes per setting. Start the stream first, then the
+noise on the host, so it's on top of everything (Steam Big Picture covers
+noise started earlier):
+
+```sh
+ffplay -f lavfi -i 'nullsrc=s=1920x1080:r=60,geq=random(1)*255:128:128' -fs
+```
+
+A setting counts as safe when Artemis's **Performance** page (MINUS + PLUS
+during a stream) holds about 60 FPS and Sunshine's log, at
+`min_log_level = debug`, shows no more than an occasional
+`IDX_REQUEST_IDR_FRAME` (Moonlight asking for a fresh frame after a loss).
+Noise makes the encoder go well over the set bitrate, more so at 1080p.
+
 ### A complete SD card tree
 
 `tools/stage-sd.sh` stages `dist/sd/`: Atmosphère 1.12.0, hekate, the
