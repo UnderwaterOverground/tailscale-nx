@@ -45,7 +45,7 @@ INCLUDES	:=	include ../../crates/tsnx-ffi/include
 #ROMFS	:=	romfs
 APP_TITLE	:=	tailscale-nx speedtest
 APP_AUTHOR	:=	UnderwaterOverground
-APP_VERSION	:=	1.2.0
+APP_VERSION	:=	1.2.1
 
 #---------------------------------------------------------------------------------
 # options for code generation
