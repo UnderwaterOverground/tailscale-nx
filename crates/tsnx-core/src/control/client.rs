@@ -530,24 +530,15 @@ impl ControlClient {
                     *status = st
                 }
                 (Step::Polling { stream, status, buf }, H2Event::Data { stream: sid, data }) if *stream == sid => {
-                    buf.extend(data);
                     if *status != 200 {
+                        buf.extend(data);
                         continue;
                     }
-                    // Length-prefixed (u32 little-endian) JSON messages.
-                    while buf.len() >= 4 {
-                        let len = u32::from_le_bytes(buf[..4].try_into().unwrap()) as usize;
-                        if len > MAX_MAP_MESSAGE {
-                            return Err(format!("map message too large: {len}"));
-                        }
-                        if buf.len() < 4 + len {
-                            break;
-                        }
-                        let msg = take_map_frame(buf, len);
+                    take_map_frames(buf, &data, |msg| {
                         if msg != br#"{"KeepAlive":true}"# {
                             new_updates.push(Update::Map(msg));
                         }
-                    }
+                    })?;
                 }
                 (Step::Polling { stream, status, buf }, H2Event::End { stream: sid }) if *stream == sid => {
                     return Err(format!("map poll ended: HTTP {status}: {}", String::from_utf8_lossy(buf)));
@@ -608,15 +599,37 @@ impl ControlClient {
     }
 }
 
-/// Takes the length-prefixed frame at the front of `buf` and returns its body
-/// in `buf`'s own allocation, so a full map never needs a second map-sized
-/// block while the receive buffer is still live. Any following bytes stay in
-/// `buf`. The caller has checked that `buf` holds `4 + len` bytes.
-fn take_map_frame(buf: &mut Vec<u8>, len: usize) -> Vec<u8> {
-    let rest = buf.split_off(4 + len);
-    let mut msg = core::mem::replace(buf, rest);
-    msg.drain(..4);
-    msg
+/// Adds a DATA payload of the map poll to `buf` and hands each completed
+/// length-prefixed (u32 little-endian) message to `on_msg`, in `buf`'s own
+/// allocation. `buf` only ever holds the message being received: once its
+/// length is known it grows to exactly that size, so a full map takes one
+/// map-sized block, never a copy or a doubled buffer next to it. If that
+/// block can't be had, the poll fails (and control reconnects later) instead
+/// of the allocation aborting the process.
+fn take_map_frames(buf: &mut Vec<u8>, mut data: &[u8], mut on_msg: impl FnMut(Vec<u8>)) -> Result<(), String> {
+    fn len_of(buf: &[u8]) -> usize {
+        u32::from_le_bytes(buf[..4].try_into().unwrap()) as usize
+    }
+    while !data.is_empty() {
+        let in_header = buf.len() < 4;
+        let want = if in_header { 4 - buf.len() } else { 4 + len_of(buf) - buf.len() };
+        let (now, rest) = data.split_at(want.min(data.len()));
+        buf.extend_from_slice(now);
+        data = rest;
+        if in_header && buf.len() == 4 {
+            let len = len_of(buf);
+            if len > MAX_MAP_MESSAGE {
+                return Err(format!("map message too large: {len}"));
+            }
+            buf.try_reserve_exact(len).map_err(|_| format!("no memory for a {len}-byte map message"))?;
+        }
+        if buf.len() >= 4 && buf.len() == 4 + len_of(buf) {
+            let mut msg = core::mem::take(buf);
+            msg.drain(..4);
+            on_msg(msg);
+        }
+    }
+    Ok(())
 }
 
 /// Like Tailscale's client, an expired node key is replaced by a fresh one,
@@ -706,39 +719,73 @@ mod tests {
         core::iter::from_fn(|| c.poll_io()).collect()
     }
 
-    #[test]
-    fn single_completed_map_frame_moves_the_original_allocation() {
-        let len = 64_369;
-        let mut buf = Vec::with_capacity(65_536);
-        buf.extend_from_slice(&(len as u32).to_le_bytes());
-        buf.resize(4 + len, b'x');
-        let original = buf.as_ptr();
-
-        let msg = take_map_frame(&mut buf, len);
-
-        assert_eq!(msg.len(), len);
-        assert_eq!(msg.as_ptr(), original, "map body was copied into another allocation");
-        assert!(buf.is_empty());
-        assert_eq!(buf.capacity(), 0, "a second map-sized buffer was allocated");
+    fn frame(body: &[u8]) -> Vec<u8> {
+        let mut f = (body.len() as u32).to_le_bytes().to_vec();
+        f.extend_from_slice(body);
+        f
     }
 
     #[test]
-    fn completed_map_frame_keeps_its_allocation_and_only_moves_the_following_frame() {
-        let mut buf = Vec::with_capacity(64);
-        buf.extend_from_slice(&3u32.to_le_bytes());
-        buf.extend_from_slice(b"one");
-        buf.extend_from_slice(&4u32.to_le_bytes());
-        buf.extend_from_slice(b"next");
-        let original = buf.as_ptr();
+    fn a_full_map_takes_one_exact_block_and_keeps_it() {
+        let body = alloc::vec![b'x'; 64_369];
+        let wire = frame(&body);
+        let mut buf = Vec::new();
+        let mut msgs = Vec::new();
+        let mut chunks = wire.chunks(16_384);
 
-        let first = take_map_frame(&mut buf, 3);
-        assert_eq!(first, b"one");
-        assert_eq!(first.as_ptr(), original);
-        assert_eq!(buf, [4, 0, 0, 0, b'n', b'e', b'x', b't']);
-        assert_eq!(buf.capacity(), 8, "only the following frame should be reallocated");
-        let second = take_map_frame(&mut buf, 4);
-        assert_eq!(second, b"next");
+        take_map_frames(&mut buf, chunks.next().unwrap(), |m| msgs.push(m)).unwrap();
+        // Sized to the message as soon as its length arrives: never doubled.
+        assert_eq!(buf.capacity(), 4 + body.len());
+        let block = buf.as_ptr();
+        for c in chunks {
+            take_map_frames(&mut buf, c, |m| msgs.push(m)).unwrap();
+        }
+
+        assert_eq!(msgs, [body]);
+        assert_eq!(msgs[0].as_ptr(), block, "the map was copied into another allocation");
+        assert_eq!(buf.capacity(), 0, "the receive buffer kept a map-sized block");
+    }
+
+    #[test]
+    fn a_chunk_ending_one_message_and_starting_the_next_never_grows_the_first() {
+        let first = alloc::vec![b'a'; 30_000];
+        let mut wire = frame(&first);
+        wire.extend_from_slice(&frame(br#"{"KeepAlive":true}"#));
+        wire.extend_from_slice(&frame(b""));
+        let (head, tail) = wire.split_at(20_000);
+        let mut buf = Vec::new();
+        let mut msgs = Vec::new();
+
+        take_map_frames(&mut buf, head, |m| msgs.push(m)).unwrap();
+        let block = buf.as_ptr();
+        take_map_frames(&mut buf, tail, |m| msgs.push(m)).unwrap();
+
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0], first);
+        assert_eq!(msgs[0].as_ptr(), block);
+        assert_eq!(msgs[0].capacity(), 4 + first.len(), "grew past its own message");
+        assert_eq!(msgs[1], br#"{"KeepAlive":true}"#);
+        assert!(msgs[2].is_empty());
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn a_length_split_across_chunks_still_parses() {
+        let wire = frame(b"hello");
+        let mut buf = Vec::new();
+        let mut msgs = Vec::new();
+        for b in &wire {
+            take_map_frames(&mut buf, core::slice::from_ref(b), |m| msgs.push(m)).unwrap();
+        }
+        assert_eq!(msgs, [b"hello".to_vec()]);
+    }
+
+    #[test]
+    fn an_oversized_map_message_fails_the_poll() {
+        let mut buf = Vec::new();
+        let len = (MAX_MAP_MESSAGE + 1) as u32;
+        let err = take_map_frames(&mut buf, &len.to_le_bytes(), |_| panic!("no message expected")).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
     }
 
     #[test]
