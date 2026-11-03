@@ -75,7 +75,7 @@ The sysmodule's boot-time update check (`native/driver/tsnx_update.c`) runs
 the same way against the real GitHub. Pass the version to compare with:
 
 ```sh
-target/tsnx-c --update-check 1.0.0   # latest 1.2.0: newer
+target/tsnx-c --update-check 1.0.0   # "newer" while a later release is out
 ```
 
 ### Running unmodified programs over the tailnet (the MITM's code paths)
@@ -144,10 +144,12 @@ noise started earlier):
 ffplay -f lavfi -i 'nullsrc=s=1920x1080:r=60,geq=random(1)*255:128:128' -fs
 ```
 
-A setting counts as safe when Artemis's **Performance** page (MINUS + PLUS
-during a stream) holds about 60 FPS and Sunshine's log, at
-`min_log_level = debug`, shows no more than an occasional
-`IDX_REQUEST_IDR_FRAME` (Moonlight asking for a fresh frame after a loss).
+A setting counts as safe when the FPS graph on Artemis's **Performance**
+page (MINUS + PLUS during a stream) stays flat at about 60 for the whole
+run, with no lasting packet loss. Judge the whole graph, not one reading. A
+burst of lost frames while the picture switches to noise is normal.
+Sunshine's log, at `min_log_level = debug`, counts the losses: each
+`IDX_REQUEST_IDR_FRAME` is Moonlight asking for a fresh frame after one.
 Noise makes the encoder go well over the set bitrate, more so at 1080p.
 
 ### A complete SD card tree
