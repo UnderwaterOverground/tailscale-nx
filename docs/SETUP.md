@@ -218,7 +218,7 @@ A forwarder whose ID does start with `01` needs listing: add its title ID
 (16 hex digits) to `mitm_titles`, separating several with commas or spaces:
 
 ```ini
-mitm_titles=0500000000001234, 05ABCDEF00000000
+mitm_titles=01FF000000001000, 01FF000000002000
 ```
 
 The title ID is the one the forwarder was made with. The tool that made it
