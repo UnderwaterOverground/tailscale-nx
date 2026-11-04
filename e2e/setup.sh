@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 ./gen-certs.sh
-mkdir -p state/headscale state/peer
+mkdir -p state/headscale state/peer state/relay
 
 docker compose up -d --wait headscale
 hs() { docker compose exec -T headscale headscale "$@"; }
@@ -16,11 +16,18 @@ if [[ ! -s state/authkey ]]; then
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])' > state/authkey
 fi
 
-docker compose --profile peer up -d peer echo web iperf
+if [[ ! -s state/relay-authkey ]]; then
+  hs preauthkeys create --user "$user_id" --reusable --expiration 720h --tags tag:relay -o json \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])' > state/relay-authkey
+fi
+
+docker compose --profile peer up -d peer echo web iperf relay
 for _ in $(seq 30); do
-  docker compose exec -T peer tailscale ip -4 >/dev/null 2>&1 && break
+  docker compose exec -T peer tailscale ip -4 >/dev/null 2>&1 \
+    && docker compose exec -T relay tailscale ip -4 >/dev/null 2>&1 && break
   sleep 1
 done
+docker compose exec -T relay tailscale set --relay-server-port=40000
 echo "headscale: https://headscale (host: https://127.0.0.1:8443), CA: e2e/state/certs/ca.der"
 echo "auth key:  $(cat state/authkey)"
 echo "peer1:     $(docker compose exec -T peer tailscale ip -4)"

@@ -1,8 +1,13 @@
 // Test tailnet access rules: everything is allowed except port 7777, which
 // run-tests.sh uses to check that tsnx enforces the rules for inbound
-// connections (as every Tailscale node must).
+// connections (as every Tailscale node must). The grant lets every node use
+// the peer relay (tag:relay, the relay service in docker-compose.yml).
 {
+  "tagOwners": {"tag:relay": ["tsnx@"]},
   "acls": [
     {"action": "accept", "src": ["*"], "dst": ["*:1-7776", "*:7778-65535"]}
+  ],
+  "grants": [
+    {"src": ["*"], "dst": ["tag:relay"], "app": {"tailscale.com/cap/relay": []}}
   ]
 }

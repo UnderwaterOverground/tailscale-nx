@@ -33,6 +33,22 @@ sleep 5
 SELF_IP=$(peer tailscale status --json | python3 -c "import json,sys; print(next(p['TailscaleIPs'][0] for p in json.load(sys.stdin)['Peer'].values() if p['HostName']=='$SELF'))")
 if peer tailscale ping -c 5 "$SELF_IP" | grep -q "via 172.30.0.30"; then pass "inbound disco ping (direct)"; else fail "inbound disco ping"; fi
 if peer ping -c 5 -W 2 "$SELF_IP" >/dev/null; then pass "inbound ICMP"; else fail "inbound ICMP"; fi
+
+# 3b. Direct UDP lost: the stock peer offers a path through relay1 (a peer
+# relay), which then carries traffic instead of DERP. Go looks for relay
+# paths at most every 30 s per peer.
+peer iptables -I INPUT -s 172.30.0.30 -p udp -j DROP
+peer iptables -I OUTPUT -d 172.30.0.30 -p udp -j DROP
+relayed=
+for _ in $(seq 10); do
+  # Not piped straight into grep -q: ping keeps writing after the match.
+  out=$(peer tailscale ping -c 2 "$SELF_IP" 2>&1)
+  if grep -q "via peer-relay" <<<"$out"; then relayed=1; break; fi
+  sleep 3
+done
+if [[ -n $relayed ]] && peer ping -c 5 -W 2 "$SELF_IP" >/dev/null; then pass "peer relay path"; else fail "peer relay path"; fi
+peer iptables -D INPUT -s 172.30.0.30 -p udp -j DROP
+peer iptables -D OUTPUT -d 172.30.0.30 -p udp -j DROP
 docker rm -f tsnx-e2e-bg >/dev/null
 
 # 4-6. Unmodified programs through the socket virtualization layer (the code

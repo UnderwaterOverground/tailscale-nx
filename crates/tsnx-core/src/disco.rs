@@ -4,6 +4,7 @@
 
 use alloc::vec::Vec;
 use core::net::{IpAddr, Ipv6Addr, SocketAddr};
+use core::time::Duration;
 
 use ts_keys::{DiscoPrivateKey, DiscoPublicKey, NodePublicKey};
 use zerocopy::IntoBytes;
@@ -16,6 +17,15 @@ const ENDPOINT_LEN: usize = 18;
 const TYPE_PING: u8 = 0x01;
 const TYPE_PONG: u8 = 0x02;
 const TYPE_CALL_ME_MAYBE: u8 = 0x03;
+const TYPE_RELAY_BIND: u8 = 0x04;
+const TYPE_RELAY_CHALLENGE: u8 = 0x05;
+const TYPE_RELAY_ANSWER: u8 = 0x06;
+const TYPE_CALL_ME_MAYBE_VIA: u8 = 0x07;
+/// A relay bind message's body: VNI, generation, remote disco key, challenge.
+const RELAY_BIND_LEN: usize = 4 + 4 + KEY_LEN + 32;
+/// A relay endpoint without its addresses: server and client disco keys,
+/// Lamport id, VNI, bind and steady-state lifetimes.
+const RELAY_ENDPOINT_LEN: usize = 3 * KEY_LEN + 8 + 4 + 8 + 8;
 
 pub type TxId = [u8; 12];
 
@@ -25,6 +35,36 @@ pub enum Message {
     /// `src` is how the pinged node saw our address.
     Pong { tx_id: TxId, src: SocketAddr },
     CallMeMaybe { endpoints: Vec<SocketAddr> },
+    /// The sender set up an endpoint on a peer relay server for the two of
+    /// us, and asks us to join it (always via DERP).
+    CallMeMaybeVia(RelayEndpoint),
+    /// The bind handshake with a peer relay server: we send Bind, the server
+    /// sends Challenge, we echo it back in Answer.
+    RelayBind { step: BindStep, vni: u32, generation: u32, remote: DiscoPublicKey, challenge: [u8; 32] },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindStep {
+    Bind,
+    Challenge,
+    Answer,
+}
+
+/// An endpoint on a peer relay server (Go: udprelay/endpoint.ServerEndpoint).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayEndpoint {
+    pub server_disco: DiscoPublicKey,
+    /// The two clients allowed to bind: the sender and us.
+    pub client_disco: [DiscoPublicKey; 2],
+    pub lamport: u64,
+    /// Geneve virtual network id: which endpoint on the server.
+    pub vni: u32,
+    /// How long the server waits for both clients to bind.
+    pub bind_lifetime: Duration,
+    /// How long a bound endpoint lasts without traffic.
+    pub steady_lifetime: Duration,
+    /// The server's addresses.
+    pub addrs: Vec<SocketAddr>,
 }
 
 pub fn is_disco(pkt: &[u8]) -> bool {
@@ -77,6 +117,32 @@ impl Message {
                     put_endpoint(&mut b, *ep);
                 }
             }
+            Message::CallMeMaybeVia(ep) => {
+                b.extend_from_slice(&[TYPE_CALL_ME_MAYBE_VIA, 0]);
+                b.extend_from_slice(ep.server_disco.as_bytes());
+                for k in &ep.client_disco {
+                    b.extend_from_slice(k.as_bytes());
+                }
+                b.extend_from_slice(&ep.lamport.to_be_bytes());
+                b.extend_from_slice(&ep.vni.to_be_bytes());
+                b.extend_from_slice(&(ep.bind_lifetime.as_nanos() as u64).to_be_bytes());
+                b.extend_from_slice(&(ep.steady_lifetime.as_nanos() as u64).to_be_bytes());
+                for a in &ep.addrs {
+                    put_endpoint(&mut b, *a);
+                }
+            }
+            Message::RelayBind { step, vni, generation, remote, challenge } => {
+                let ty = match step {
+                    BindStep::Bind => TYPE_RELAY_BIND,
+                    BindStep::Challenge => TYPE_RELAY_CHALLENGE,
+                    BindStep::Answer => TYPE_RELAY_ANSWER,
+                };
+                b.extend_from_slice(&[ty, 0]);
+                b.extend_from_slice(&vni.to_be_bytes());
+                b.extend_from_slice(&generation.to_be_bytes());
+                b.extend_from_slice(remote.as_bytes());
+                b.extend_from_slice(challenge);
+            }
         }
         b
     }
@@ -96,9 +162,49 @@ impl Message {
             TYPE_CALL_ME_MAYBE if body.len() % ENDPOINT_LEN == 0 => {
                 Some(Message::CallMeMaybe { endpoints: body.chunks_exact(ENDPOINT_LEN).map(get_endpoint).collect() })
             }
+            TYPE_RELAY_BIND | TYPE_RELAY_CHALLENGE | TYPE_RELAY_ANSWER if body.len() >= RELAY_BIND_LEN => {
+                let step = match ty {
+                    TYPE_RELAY_BIND => BindStep::Bind,
+                    TYPE_RELAY_CHALLENGE => BindStep::Challenge,
+                    _ => BindStep::Answer,
+                };
+                Some(Message::RelayBind {
+                    step,
+                    vni: be32(&body[0..]),
+                    generation: be32(&body[4..]),
+                    remote: key_at(&body[8..]),
+                    challenge: body[40..72].try_into().ok()?,
+                })
+            }
+            TYPE_CALL_ME_MAYBE_VIA
+                if body.len() > RELAY_ENDPOINT_LEN && (body.len() - RELAY_ENDPOINT_LEN) % ENDPOINT_LEN == 0 =>
+            {
+                let n = 3 * KEY_LEN;
+                Some(Message::CallMeMaybeVia(RelayEndpoint {
+                    server_disco: key_at(body),
+                    client_disco: [key_at(&body[KEY_LEN..]), key_at(&body[2 * KEY_LEN..])],
+                    lamport: be64(&body[n..]),
+                    vni: be32(&body[n + 8..]),
+                    bind_lifetime: Duration::from_nanos(be64(&body[n + 12..])),
+                    steady_lifetime: Duration::from_nanos(be64(&body[n + 20..])),
+                    addrs: body[RELAY_ENDPOINT_LEN..].chunks_exact(ENDPOINT_LEN).map(get_endpoint).collect(),
+                }))
+            }
             _ => None,
         }
     }
+}
+
+fn be32(b: &[u8]) -> u32 {
+    u32::from_be_bytes(b[..4].try_into().unwrap())
+}
+
+fn be64(b: &[u8]) -> u64 {
+    u64::from_be_bytes(b[..8].try_into().unwrap())
+}
+
+fn key_at(b: &[u8]) -> DiscoPublicKey {
+    DiscoPublicKey::from_bytes(b[..KEY_LEN].try_into().unwrap())
 }
 
 /// Seals a disco message from `ours` to `theirs`.
@@ -150,6 +256,22 @@ mod tests {
             Message::Pong { tx_id: [8; 12], src: "[2001:db8::1]:41641".parse().unwrap() },
             Message::CallMeMaybe {
                 endpoints: alloc::vec!["192.0.2.1:1".parse().unwrap(), "[2001:db8::2]:2".parse().unwrap()],
+            },
+            Message::CallMeMaybeVia(RelayEndpoint {
+                server_disco: DiscoPrivateKey::from_bytes([4; 32]).public_key(),
+                client_disco: [a.public_key(), b.public_key()],
+                lamport: 3,
+                vni: 0x00ab_cdef,
+                bind_lifetime: Duration::from_secs(30),
+                steady_lifetime: Duration::from_secs(300),
+                addrs: alloc::vec!["198.51.100.9:40000".parse().unwrap()],
+            }),
+            Message::RelayBind {
+                step: BindStep::Challenge,
+                vni: 7,
+                generation: 9,
+                remote: a.public_key(),
+                challenge: [5; 32],
             },
         ];
         for m in msgs {

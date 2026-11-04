@@ -6,6 +6,7 @@
 //! proves a direct path, which then carries traffic while heartbeat pings keep
 //! it confirmed. If confirmation lapses, traffic falls back to DERP. While a
 //! peer is relayed, each round also pings it through DERP, to time that path.
+//! Between the two, a peer relay path (relay.rs) beats DERP when there is one.
 
 use alloc::vec::Vec;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -20,12 +21,12 @@ use crate::disco::{self, Message};
 use crate::time::Instant;
 
 /// How long a pong-confirmed direct path is trusted without a new pong.
-const TRUST_UDP_ADDR: Duration = Duration::from_millis(6500);
+pub(super) const TRUST_UDP_ADDR: Duration = Duration::from_millis(6500);
 /// More distinct public mappings than this in one netcheck round means a
 /// per-destination ("hard") NAT; see finish_netcheck.
 const MAX_PUBLIC_ENDPOINTS: usize = 3;
 /// Heartbeat pings on an in-use direct path.
-const HEARTBEAT: Duration = Duration::from_secs(3);
+pub(super) const HEARTBEAT: Duration = Duration::from_secs(3);
 /// Minimum spacing of discovery rounds to a peer's endpoints.
 const PING_ROUND_INTERVAL: Duration = Duration::from_secs(5);
 const CALL_ME_MAYBE_INTERVAL: Duration = Duration::from_secs(5);
@@ -33,7 +34,7 @@ const CALL_ME_MAYBE_INTERVAL: Duration = Duration::from_secs(5);
 const SESSION_ACTIVE: Duration = Duration::from_secs(45);
 /// A relayed path's measured round trip is shown for this long.
 const RELAY_LATENCY_FRESH: Duration = Duration::from_secs(15);
-const PING_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const PING_TIMEOUT: Duration = Duration::from_secs(5);
 const STUN_INTERVAL: Duration = Duration::from_secs(23);
 const STUN_RETRY: Duration = Duration::from_secs(3);
 /// A netcheck round waits this long for STUN replies from all regions.
@@ -53,6 +54,8 @@ const MAX_CANDIDATES: usize = 16;
 pub(super) enum Source {
     Udp(SocketAddr),
     Derp { region: u32, node: NodePublicKey },
+    /// Through a peer relay server at `addr`, on its endpoint `vni`.
+    Relay { addr: SocketAddr, vni: u32 },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -69,7 +72,7 @@ pub(super) struct PathState {
     pings: Vec<(disco::TxId, SocketAddr, Instant)>,
     last_round: Option<Instant>,
     last_call_me_maybe: Option<Instant>,
-    last_active: Option<Instant>,
+    pub(super) last_active: Option<Instant>,
     /// Endpoints learned from CallMeMaybe / inbound pings, beyond the netmap's.
     candidates: Vec<SocketAddr>,
     /// First data sent since we last heard anything from the peer.
@@ -78,14 +81,16 @@ pub(super) struct PathState {
     last_session_repair: Option<Instant>,
     /// The last round trip of a ping through DERP, and when it came back.
     relay_latency: Option<(Duration, Instant)>,
+    /// An endpoint on a peer relay server, offered by the peer.
+    pub(super) relay: Option<alloc::boxed::Box<super::relay::RelayPath>>,
 }
 
 impl PathState {
-    fn trusted(&self, now: Instant) -> Option<SocketAddr> {
+    pub(super) fn trusted(&self, now: Instant) -> Option<SocketAddr> {
         self.best.filter(|b| now.saturating_duration_since(b.confirmed) < TRUST_UDP_ADDR).map(|b| b.addr)
     }
 
-    fn active(&self, now: Instant) -> bool {
+    pub(super) fn active(&self, now: Instant) -> bool {
         self.last_active.is_some_and(|t| now.saturating_duration_since(t) < SESSION_ACTIVE)
     }
 
@@ -189,17 +194,22 @@ impl Engine {
             peer.path.unanswered_since = Some(now);
         }
         let direct = peer.path.trusted(now);
+        let relayed = peer.path.relay.as_ref().and_then(|r| r.trusted(now)).filter(|_| direct.is_none());
         // While a direct path is unproven (or lapsed), keep DERP as the
         // reliable carrier; a stale best address also gets a copy.
         let stale = peer.path.best.map(|b| b.addr).filter(|a| Some(*a) != direct);
         let region = peer.home_derp.or(home);
         let key = peer.key;
         log::trace!(
-            "transmit {} to {}: direct={direct:?} stale={stale:?} derp={region:?}",
+            "transmit {} to {}: direct={direct:?} relay={relayed:?} stale={stale:?} derp={region:?}",
             pkts.len(),
             peer.name
         );
         for p in pkts {
+            if let (None, Some((addr, vni))) = (direct, relayed) {
+                self.io.push_back(Io::SendUdp { dst: addr, data: super::relay::wrap_wireguard(vni, p.as_ref()) });
+                continue;
+            }
             let data = p.as_ref().to_vec();
             match direct {
                 Some(addr) => self.io.push_back(Io::SendUdp { dst: addr, data }),
@@ -340,7 +350,7 @@ impl Engine {
         Some(pkt)
     }
 
-    fn seal_disco(&self, to: &ts_keys::DiscoPublicKey, msg: &Message) -> Option<Vec<u8>> {
+    pub(super) fn seal_disco(&self, to: &ts_keys::DiscoPublicKey, msg: &Message) -> Option<Vec<u8>> {
         disco::seal(&self.disco_private, to, &self.node_private.public_key(), msg)
     }
 
@@ -354,12 +364,16 @@ impl Engine {
             return;
         };
         let now = self.now;
+        if let Source::Relay { addr, vni } = source {
+            self.handle_relayed_disco(node_id, addr, vni, msg);
+            return;
+        }
 
         match msg {
             Message::Ping { tx_id, .. } => {
                 let observed = match source {
-                    Source::Udp(addr) => addr,
                     Source::Derp { region, .. } => via_derp(region),
+                    Source::Udp(addr) | Source::Relay { addr, .. } => addr,
                 };
                 let Some(pong) = self.seal_disco(&from, &Message::Pong { tx_id, src: observed }) else { return };
                 match source {
@@ -379,6 +393,7 @@ impl Engine {
                         }
                     }
                     Source::Derp { region, node } => self.derp_send(region, node, pong),
+                    Source::Relay { .. } => {}
                 }
             }
             Message::Pong { tx_id, src: _ } => {
@@ -428,6 +443,8 @@ impl Engine {
                 }
                 self.discover(node_id, true);
             }
+            Message::CallMeMaybeVia(ep) if matches!(source, Source::Derp { .. }) => self.handle_call_me_maybe_via(node_id, ep),
+            _ => {}
         }
     }
 
@@ -459,6 +476,7 @@ impl Engine {
             if self.peers.get(&id).is_some_and(|p| p.path.active(now)) {
                 self.discover(id, false);
             }
+            self.relay_tick(id);
         }
     }
 

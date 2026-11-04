@@ -84,6 +84,30 @@ services:
     depends_on: [peer]
     profiles: [peer]
 
+  # A Tailscale peer relay (tag:relay, UDP 40000), for paths where direct UDP
+  # is blocked. setup.sh turns the relay server on.
+  relay:
+    image: tailscale/tailscale:stable
+    hostname: relay1
+    environment:
+      TS_AUTHKEY: file:/state/relay-authkey
+      TS_EXTRA_ARGS: --login-server=https://headscale
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "true"
+      TS_HOSTNAME: relay1
+      SSL_CERT_FILE: /certs/ca.pem
+    volumes:
+      - ./state/certs:/certs:ro
+      - ./state:/state:ro
+      - ./state/relay:/var/lib/tailscale
+    networks:
+      tsnx:
+        ipv4_address: 172.30.0.40
+    depends_on:
+      headscale:
+        condition: service_healthy
+    profiles: [peer]
+
   # tsnx-host built for Linux and run on the compose network, so direct UDP
   # paths to peer1 are possible (the Mac cannot reach container IPs).
   # Build:  docker compose run --rm tsnx-build

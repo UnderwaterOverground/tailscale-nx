@@ -8,6 +8,7 @@ mod magic;
 pub use magic::ActivePeer;
 mod netmap;
 mod packet;
+mod relay;
 pub mod taildrop;
 
 use alloc::boxed::Box;
@@ -387,6 +388,8 @@ impl Engine {
         self.now = now;
         if crate::stun::is_stun(data) {
             self.handle_stun(data);
+        } else if self.handle_relayed(src, data) {
+            // From a peer relay server: handled there.
         } else if crate::disco::is_disco(data) {
             self.handle_disco(magic::Source::Udp(src), data);
         } else {
@@ -625,7 +628,8 @@ impl Engine {
     }
 
     /// Handles a WireGuard packet from the underlay. `udp_src` is set when
-    /// it arrived directly rather than via DERP.
+    /// it arrived directly; `derp_src` when the underlay says who sent it
+    /// (DERP, or a peer relay path).
     fn handle_wg(&mut self, pkt: Vec<u8>, udp_src: Option<SocketAddr>, derp_src: Option<NodePublicKey>) {
         let (ty, len) = (pkt.first().copied().unwrap_or(0), pkt.len());
         let res = self.wg.recv(self.now, [PacketMut::from(pkt)]);
