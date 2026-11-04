@@ -253,7 +253,7 @@ to `mitm=homebrew`.
 
 tailscale-nx uses exactly **2.5 MB** of the memory the system sets aside for
 sysmodules, taken once when it starts. It never grows or shrinks: about
-1 MB of code and 1.5 MB of data, including a fixed heap of 768 KB. Busy tailnet
+1 MB of code and 1.5 MB of data, including a fixed heap of 764 KB. Busy tailnet
 sockets use more of that heap, up to the `overlay_budget_kb` limit.
 
 - The overlay shows how much system memory is free with everything loaded.

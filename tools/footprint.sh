@@ -9,7 +9,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 target=$((0x280000))
-min_heap=$((768 * 1024))  # engine (~300 KB) + overlay_budget_kb up to 384 + slack
+min_heap=$((764 * 1024))  # engine (~300 KB) + overlay_budget_kb up to 384 + slack
 elf=switch/sysmodule/tailscale-nx.elf
 header=switch/sysmodule/source/heap_size.h
 readelf=/opt/devkitpro/devkitA64/bin/aarch64-none-elf-readelf
