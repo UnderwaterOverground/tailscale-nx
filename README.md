@@ -195,6 +195,15 @@ before putting the console to sleep.
 again from the same hbmenu session, with or without tailscale-nx. Close
 hbmenu from the HOME menu and open it again.
 
+**I use Tailnet Lock. How do I sign the Switch?** tailscale-nx can't make
+its own tailnet lock key yet, but you can sign it from a device with a
+trusted key. Run `tailscale lock status` there: the Switch is listed under
+the locked out nodes, with its `nodekey:...`. Then run
+`tailscale lock sign nodekey:...` with that key (the second key it mentions
+is optional). Disable key expiry for the Switch too (step 4 above), or it
+needs signing again when its key expires. The Switch doesn't check other
+devices' signatures itself; your other devices still check its.
+
 **Is my traffic private?** Like the official Tailscale clients, tailnet
 traffic is encrypted end to end with WireGuard. Tailscale's servers
 coordinate keys and relay encrypted packets when a direct connection isn't
