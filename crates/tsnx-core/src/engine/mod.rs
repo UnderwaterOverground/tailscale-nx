@@ -5,7 +5,7 @@
 
 mod filter;
 mod magic;
-pub use magic::ActivePeer;
+pub use magic::{ActivePeer, Path};
 mod netmap;
 mod packet;
 mod relay;
@@ -1123,6 +1123,10 @@ mod tests {
         add_peer(&mut e, 2, "laptop.tail1234.ts.net.", Some(8), magic::PathState::for_test(sent(1), Some((addr, now - Duration::from_secs(20)))));
         // No region of its own: ours.
         add_peer(&mut e, 3, "phone.tail1234.ts.net.", None, magic::PathState::for_test(sent(30), None));
+        // No direct path, but a peer relay path confirmed 3 s ago.
+        let mut relayed = magic::PathState::for_test(sent(10), None);
+        relayed.relay = Some(alloc::boxed::Box::new(relay::RelayPath::for_test(addr, now - Duration::from_secs(3), Duration::from_millis(9))));
+        add_peer(&mut e, 6, "desktop.tail1234.ts.net.", Some(8), relayed);
         // Idle for longer than SESSION_ACTIVE, or never used: not listed.
         add_peer(&mut e, 4, "old.tail1234.ts.net.", Some(8), magic::PathState::for_test(sent(60), None));
         add_peer(&mut e, 5, "unused.tail1234.ts.net.", Some(8), magic::PathState::default());
@@ -1130,9 +1134,10 @@ mod tests {
         assert_eq!(
             e.active_peers(),
             [
-                ActivePeer { name: "laptop", relay: Some(8), latency: None },
-                ActivePeer { name: "gaming-pc", relay: None, latency: Some(Duration::from_millis(4)) },
-                ActivePeer { name: "phone", relay: Some(HOME), latency: None },
+                ActivePeer { name: "laptop", path: Path::Derp(8), latency: None },
+                ActivePeer { name: "gaming-pc", path: Path::Direct, latency: Some(Duration::from_millis(4)) },
+                ActivePeer { name: "desktop", path: Path::PeerRelay, latency: Some(Duration::from_millis(9)) },
+                ActivePeer { name: "phone", path: Path::Derp(HOME), latency: None },
             ]
         );
     }

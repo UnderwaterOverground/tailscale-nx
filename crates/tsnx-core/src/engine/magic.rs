@@ -106,12 +106,20 @@ impl PathState {
 pub struct ActivePeer<'a> {
     /// The first label of its name ("gaming-pc", not the full MagicDNS name).
     pub name: &'a str,
-    /// None: a confirmed direct path. Some(region): relayed through that
-    /// DERP region (0 if no region is known yet).
-    pub relay: Option<u32>,
-    /// The path's round trip: a direct one's from its last pong, a relayed
-    /// one's from the last ping through DERP (None until measured).
+    pub path: Path,
+    /// The path's round trip: from its last pong, or for DERP, the last ping
+    /// through DERP (None until measured).
     pub latency: Option<Duration>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Path {
+    /// A confirmed direct path.
+    Direct,
+    /// Through a peer relay (relay.rs).
+    PeerRelay,
+    /// Relayed through this DERP region (0 if no region is known yet).
+    Derp(u32),
 }
 
 pub(super) struct MagicState {
@@ -166,15 +174,17 @@ impl Engine {
             .values()
             .filter(|p| p.path.active(now))
             .filter_map(|p| {
-                let (relay, latency) = match p.path.trusted(now) {
-                    Some(_) => (None, p.path.best.map(|b| b.latency)),
-                    None => {
+                let peer_relay = p.path.relay.as_ref().filter(|r| r.trusted(now).is_some());
+                let (path, latency) = match (p.path.trusted(now), peer_relay) {
+                    (Some(_), _) => (Path::Direct, p.path.best.map(|b| b.latency)),
+                    (None, Some(r)) => (Path::PeerRelay, r.latency()),
+                    (None, None) => {
                         let fresh = p.path.relay_latency.filter(|(_, at)| now.saturating_duration_since(*at) < RELAY_LATENCY_FRESH);
-                        (Some(p.home_derp.or(self.home_derp).unwrap_or(0)), fresh.map(|(l, _)| l))
+                        (Path::Derp(p.home_derp.or(self.home_derp).unwrap_or(0)), fresh.map(|(l, _)| l))
                     }
                 };
                 let name = p.name.split('.').next().unwrap_or_default();
-                Some((p.path.last_active?, ActivePeer { name, relay, latency }))
+                Some((p.path.last_active?, ActivePeer { name, path, latency }))
             })
             .collect();
         peers.sort_by(|a, b| b.0.cmp(&a.0));
@@ -678,7 +688,7 @@ mod tests {
         let pong = disco::seal(&theirs, &e.disco_private.public_key(), &their_node, &Message::Pong { tx_id, src: via_derp(8) }).unwrap();
         e.handle_disco(Source::Derp { region: 8, node: their_node }, &pong);
         let peer = &e.active_peers()[0];
-        assert_eq!((peer.relay, peer.latency), (Some(8), Some(Duration::from_millis(40))));
+        assert_eq!((&peer.path, peer.latency), (&Path::Derp(8), Some(Duration::from_millis(40))));
         // It doesn't count as a direct path.
         assert!(e.peers[&1].path.trusted(e.now).is_none());
 

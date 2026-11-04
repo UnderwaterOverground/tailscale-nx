@@ -52,6 +52,29 @@ impl RelayPath {
         (now.saturating_duration_since(at) < TRUST_UDP_ADDR).then_some((self.bound?, self.vni))
     }
 
+    /// A path bound to `addr` and confirmed at `at`, `latency` round trip.
+    #[cfg(test)]
+    pub(super) fn for_test(addr: SocketAddr, at: Instant, latency: Duration) -> Self {
+        RelayPath {
+            server_disco: DiscoPublicKey::from_bytes([9; 32]),
+            vni: 1,
+            addrs: alloc::vec![addr],
+            generation: 1,
+            offered: at,
+            last_bind: at,
+            bind_lifetime: Duration::from_secs(30),
+            steady_lifetime: Duration::from_secs(300),
+            bound: Some(addr),
+            pings: Vec::new(),
+            confirmed: Some((at, latency)),
+        }
+    }
+
+    /// The last pong's round trip.
+    pub(super) fn latency(&self) -> Option<Duration> {
+        self.confirmed.map(|(_, latency)| latency)
+    }
+
     fn expired(&self, now: Instant) -> bool {
         match self.confirmed {
             Some((at, _)) => now.saturating_duration_since(at) >= self.steady_lifetime,

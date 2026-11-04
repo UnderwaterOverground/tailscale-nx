@@ -538,15 +538,15 @@ namespace {
         }
     }
 
-    // How a peer is reached: "Direct 4 ms", or "via London 45 ms" when
-    // relayed. Too wide for `w` pixels, the city is cut ("via Johanne...
-    // 180 ms"), never the latency.
+    // How a peer is reached: "Direct 4 ms", "Peer relay 9 ms", or "via
+    // London 45 ms" when relayed by DERP. Too wide for `w` pixels, the city
+    // is cut ("via Johanne... 180 ms"), never the latency.
     void PeerPath(tsl::gfx::Renderer *r, const TsnxCtlPeer &p, s32 w, char *out, size_t cap) {
         char ms[12] = "";
         if (p.latency_ms) std::snprintf(ms, sizeof ms, " %u ms", p.latency_ms);
         const char *via = p.direct ? nullptr : RegionName(p.relay_region);
         if (!via) {
-            std::snprintf(out, cap, "%s%s", p.direct ? "Direct" : "Relayed", ms);
+            std::snprintf(out, cap, "%s%s", p.direct == 1 ? "Direct" : p.direct == 2 ? "Peer relay" : "Relayed", ms);
             return;
         }
         std::snprintf(out, cap, "via %s%s", via, ms);
@@ -556,7 +556,7 @@ namespace {
         }
     }
 
-    tsl::Color PathColor(const TsnxCtlPeer &p) { return p.direct ? Green : Yellow; }
+    tsl::Color PathColor(const TsnxCtlPeer &p) { return p.direct == 1 ? Green : Yellow; }
 
     // No internet connection (not while paused or stopping: then it's moot).
     bool Offline() {

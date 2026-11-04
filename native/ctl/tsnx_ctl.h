@@ -68,7 +68,7 @@ typedef struct {
 
 typedef struct {
     char name[32];          // first label of its name, NUL-terminated
-    uint8_t direct;         // 1: a confirmed direct path; 0: relayed (DERP)
+    uint8_t direct;         // 1: a confirmed direct path; 2: a peer relay; 0: DERP
     uint8_t reserved;
     uint16_t latency_ms;    // the path's round trip, direct or through the relay (0: unknown)
     uint32_t relay_region;  // when relayed: the DERP region id (0: unknown)

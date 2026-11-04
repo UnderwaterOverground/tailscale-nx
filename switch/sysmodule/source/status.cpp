@@ -365,7 +365,7 @@ namespace ams::status {
             p.direct = peers[i].direct;
             p.latency_ms = peers[i].latency_ms;
             p.relay_region = peers[i].relay_region;
-            direct |= p.direct != 0;
+            direct |= p.direct == 1;
         }
         if (direct) g_status.flags |= TSNX_CTL_FLAG_DIRECT;
         else g_status.flags &= ~static_cast<u32>(TSNX_CTL_FLAG_DIRECT);

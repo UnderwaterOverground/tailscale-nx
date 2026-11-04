@@ -165,7 +165,7 @@ size_t tsnx_engine_hosts(TsnxEngine *e, char *buf, size_t cap);
 // into out. Returns how many there are (can be more than max).
 typedef struct {
     char name[32];          // first label of its name, NUL-terminated
-    uint8_t direct;         // 1: confirmed direct path; 0: relayed (DERP)
+    uint8_t direct;         // 1: confirmed direct path; 2: a peer relay; 0: DERP
     uint8_t reserved;
     uint16_t latency_ms;    // the path's round trip, direct or relayed (0 if unknown)
     uint32_t relay_region;  // when relayed: the DERP region (0 if unknown)

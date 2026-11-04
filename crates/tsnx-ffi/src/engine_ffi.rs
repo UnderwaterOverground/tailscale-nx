@@ -9,7 +9,7 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use core::time::Duration;
 
 use tsnx_core::control::client::ControlConfig;
-use tsnx_core::engine::{Engine, EngineConfig, Event, Io};
+use tsnx_core::engine::{Engine, EngineConfig, Event, Io, Path};
 use tsnx_core::netstack::NetError;
 use tsnx_core::time::Instant;
 
@@ -473,11 +473,15 @@ pub unsafe extern "C" fn tsnx_engine_active_peers(e: *mut TsnxEngine, out: *mut 
         for (dst, src) in o.name.iter_mut().zip(p.name.bytes().take(31)) {
             *dst = src as c_char;
         }
-        o.direct = p.relay.is_none() as u8;
+        o.direct = match p.path {
+            Path::Direct => 1,
+            Path::PeerRelay => 2,
+            Path::Derp(_) => 0,
+        };
         o._reserved = 0;
         // Rounded up, so a fast LAN path shows 1 ms, not "unknown".
         o.latency_ms = p.latency.map_or(0, |l| l.as_micros().div_ceil(1000).clamp(1, u16::MAX as u128) as u16);
-        o.relay_region = p.relay.unwrap_or(0);
+        o.relay_region = if let Path::Derp(region) = p.path { region } else { 0 };
     }
     peers.len()
 }
