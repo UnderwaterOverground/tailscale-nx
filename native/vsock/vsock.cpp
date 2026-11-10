@@ -406,16 +406,21 @@ Result VSock::Accept(int fd, sockaddr *addr, socklen_t *len) {
             return s;
         }
         if (!v.virtual_only) {
-            // Real side: non-blocking attempt.
+            // Real side: non-blocking attempt (any revents means accept
+            // won't block: a connection, or an error it returns). A failing
+            // poll ends the call rather than looping on it.
             pollfd p{fd, POLLIN, 0};
-            if (real_.Poll(&p, 1, 0).ret > 0) return real_.Accept(fd, addr, len);
+            Result pr = real_.Poll(&p, 1, 0);
+            if (pr.ret < 0) return pr;
+            if (pr.ret > 0) return real_.Accept(fd, addr, len);
         }
         if (v.nonblock) return Fail(Err::Again);
         if (v.virtual_only) {
             if (!WaitEngine(v.listen, TSNX_READABLE, -1)) return Fail(Err::Again);
         } else {
             pollfd p{fd, POLLIN, 0};
-            real_.Poll(&p, 1, kMixedPollSliceMs);
+            Result pr = real_.Poll(&p, 1, kMixedPollSliceMs);
+            if (pr.ret < 0) return pr;
         }
         if (!Get(fd, &v)) return Fail(Err::BadF);
     }
