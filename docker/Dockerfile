@@ -1,6 +1,8 @@
 # Switch build image: devkitA64 + libnx + portlibs, plus Rust nightly for
 # -Zbuild-std on the aarch64-nintendo-switch-freestanding target.
-FROM devkitpro/devkita64:latest
+# Pinned (the image every release so far was built with), so a new
+# devkitPro image can't change a release build unnoticed.
+FROM devkitpro/devkita64:20260219@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282
 
 ARG RUST_TOOLCHAIN=nightly-2026-09-25
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
