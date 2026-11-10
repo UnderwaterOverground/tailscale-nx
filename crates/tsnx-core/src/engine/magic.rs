@@ -48,6 +48,9 @@ const HANDSHAKE_REPAIR_INTERVAL: Duration = Duration::from_secs(5);
 /// Go's magic IP for "via DERP" in pongs: 127.3.3.40:<region>.
 const DERP_MAGIC_IP: Ipv4Addr = Ipv4Addr::new(127, 3, 3, 40);
 const MAX_CANDIDATES: usize = 16;
+/// A peer in use without a direct path this long gets one log line saying
+/// so: it's the usual reason a stream is slow.
+const NO_DIRECT_NOTICE: Duration = Duration::from_secs(30);
 
 /// Where a disco packet came from.
 #[derive(Debug, Clone, Copy)]
@@ -83,6 +86,10 @@ pub(super) struct PathState {
     relay_latency: Option<(Duration, Instant)>,
     /// An endpoint on a peer relay server, offered by the peer.
     pub(super) relay: Option<alloc::boxed::Box<super::relay::RelayPath>>,
+    /// Since when the peer has been in use without a direct path, and
+    /// whether the log has said so.
+    relayed_since: Option<Instant>,
+    told_relayed: bool,
 }
 
 impl PathState {
@@ -487,6 +494,33 @@ impl Engine {
                 self.discover(id, false);
             }
             self.relay_tick(id);
+            self.note_no_direct_path(id);
+        }
+    }
+
+    /// Logs once when a peer in use has had no direct path for
+    /// NO_DIRECT_NOTICE, with what discovery had to work with.
+    fn note_no_direct_path(&mut self, id: i64) {
+        let now = self.now;
+        let ours = self.advertised_endpoints().len();
+        let home = self.home_derp;
+        let Some(p) = self.peers.get_mut(&id) else { return };
+        if !p.path.active(now) || p.path.trusted(now).is_some() {
+            p.path.relayed_since = None;
+            p.path.told_relayed = false;
+            return;
+        }
+        let since = *p.path.relayed_since.get_or_insert(now);
+        if p.path.told_relayed || now.saturating_duration_since(since) < NO_DIRECT_NOTICE {
+            return;
+        }
+        p.path.told_relayed = true;
+        let theirs = p.endpoints.iter().chain(p.path.candidates.iter()).filter(|e| is_usable(e)).count();
+        if p.path.relay.as_ref().is_some_and(|r| r.trusted(now).is_some()) {
+            log::info!("no direct path to {} after 30 s: using a peer relay ({theirs} of its addresses tried, {ours} of ours offered)", p.name);
+        } else {
+            let region = p.home_derp.or(home).unwrap_or(0);
+            log::info!("no direct path to {} after 30 s: relayed through DERP region {region} ({theirs} of its addresses tried, {ours} of ours offered)", p.name);
         }
     }
 
@@ -695,6 +729,28 @@ mod tests {
         // Shown only while fresh.
         e.now = start + RELAY_LATENCY_FRESH + Duration::from_secs(1);
         assert_eq!(e.active_peers()[0].latency, None);
+    }
+
+    #[test]
+    fn a_peer_without_a_direct_path_is_noted_once() {
+        let start = Instant::from_nanos(1_000_000_000);
+        let mut e = super::super::tests::engine(start);
+        super::super::tests::add_peer(&mut e, 1, "gaming-pc.tail1234.ts.net.", Some(8), PathState::for_test(Some(start), None));
+        let tick_at = |e: &mut Engine, secs: u64| {
+            e.now = start + Duration::from_secs(secs);
+            e.peers.get_mut(&1).unwrap().path.last_active = Some(e.now);
+            e.magic_tick();
+            e.peers[&1].path.told_relayed
+        };
+        assert!(!tick_at(&mut e, 0));
+        assert!(!tick_at(&mut e, 29));
+        assert!(tick_at(&mut e, 30));
+        // A direct path resets it, so a later relayed stretch is noted again.
+        let addr: SocketAddr = "192.0.2.7:41641".parse().unwrap();
+        let now = start + Duration::from_secs(31);
+        e.peers.get_mut(&1).unwrap().path.best = Some(BestAddr { addr, latency: Duration::from_millis(4), confirmed: now });
+        assert!(!tick_at(&mut e, 31));
+        assert_eq!(e.peers[&1].path.relayed_since, None);
     }
 
     #[test]
