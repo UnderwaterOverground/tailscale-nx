@@ -38,9 +38,9 @@ namespace ams::bsd_mitm {
     // Cores for the engine loop and the threads serving homebrew's socket
     // calls: core 2 first. Core 3, where sysmodules run, also runs the
     // socket service, and under a 16 Mbit/s stream the two saturated it
-    // (Moonlight then dropped frames); moved to core 2, the overlay drops
-    // went from 40-90 a second to under 10. Core 3 stays allowed, so the
-    // kernel can move them back while a game keeps core 2 busy.
+    // (Moonlight then dropped frames); with both moved to core 2, the
+    // overlay drops went from 40-90 a second to 4-18. Core 3 stays allowed,
+    // so the kernel can move them back while a game keeps core 2 busy.
     constexpr s32 PreferredCore = 2;
     constexpr u64 EngineCores = (1ull << 2) | (1ull << 3);
 
