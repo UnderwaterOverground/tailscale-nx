@@ -21,7 +21,7 @@ if [[ ! -s state/relay-authkey ]]; then
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])' > state/relay-authkey
 fi
 
-docker compose --profile peer up -d peer echo web iperf relay
+docker compose --profile peer up -d peer echo web iperf files relay
 for _ in $(seq 30); do
   docker compose exec -T peer tailscale ip -4 >/dev/null 2>&1 \
     && docker compose exec -T relay tailscale ip -4 >/dev/null 2>&1 && break

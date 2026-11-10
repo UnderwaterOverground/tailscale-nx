@@ -67,6 +67,12 @@ else
   fail "socket virtualization suite (see /tmp/tsnx-e2e-4.log)"
 fi
 if preload "curl -s -m 10 http://$PEER_IP:8080/" 2>/dev/null | grep -q "<html"; then pass "unmodified curl over the tailnet"; else fail "unmodified curl"; fi
+# File browsers' libraries (issue #3): SFTP with libssh2, SMB with libsmb2.
+if preload "timeout 60 /src/target/linux/files-probe sftp $PEER_IP && timeout 60 /src/target/linux/files-probe smb $PEER_IP" >/tmp/tsnx-e2e-files.log 2>&1; then
+  pass "SFTP and SMB (libssh2, libsmb2)"
+else
+  fail "SFTP and SMB (see /tmp/tsnx-e2e-files.log)"
+fi
 udp=$(preload "iperf3 -c $PEER_IP -u -b 50M -l 1200 -t 4 -R -f m 2>&1 | grep receiver" 2>/dev/null)
 mbps=$(echo "$udp" | awk '{for (i=1;i<=NF;i++) if ($i=="Mbits/sec") print $(i-1)}')
 if awk "BEGIN{exit !(${mbps:-0} >= 47)}"; then pass "UDP 50 Mbit/s stream (got ${mbps} Mbit/s)"; else fail "UDP 50 Mbit/s stream (got ${mbps:-none})"; fi

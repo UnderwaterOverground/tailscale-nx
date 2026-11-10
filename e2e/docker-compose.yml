@@ -84,6 +84,28 @@ services:
     depends_on: [peer]
     profiles: [peer]
 
+  # SFTP (22) and SMB (445) on peer1's tailnet IP, user tsnx / password
+  # tsnx, for the file-browser apps' libraries (libssh2, libsmb2). The share
+  # "share" holds hello.txt.
+  files:
+    image: alpine:3
+    network_mode: service:peer
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        apk add -q --no-cache openssh-server samba
+        adduser -D tsnx && echo tsnx:tsnx | chpasswd
+        printf 'tsnx\ntsnx\n' | smbpasswd -a -s tsnx
+        mkdir -p /srv/share && echo 'hello over the tailnet' > /srv/share/hello.txt && chown -R tsnx /srv/share
+        printf '[global]\nserver min protocol = SMB2\n[share]\npath = /srv/share\nvalid users = tsnx\n' > /etc/samba/smb.conf
+        ssh-keygen -A >/dev/null
+        printf 'PasswordAuthentication yes\nSubsystem sftp internal-sftp\n' >> /etc/ssh/sshd_config
+        /usr/sbin/sshd -e
+        exec smbd --foreground --no-process-group --debug-stdout
+    depends_on: [peer]
+    profiles: [peer]
+
   # A Tailscale peer relay (tag:relay, UDP 40000), for paths where direct UDP
   # is blocked. setup.sh turns the relay server on.
   relay:

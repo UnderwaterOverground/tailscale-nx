@@ -23,10 +23,12 @@
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include <string.h>
 
+#include <algorithm>
 #include <atomic>
 #include <type_traits>
 #include <memory>
@@ -285,6 +287,31 @@ extern "C" ssize_t tsnx_write(int fd, const void *b, size_t n) {
     return Traced<ssize_t>("write", fd, v->Send(fd, b, n, 0));
 }
 
+// readv/writev through one buffer, as libsmb2's own emulation does on the
+// Switch (libnx has neither), so they reach Recv/Send.
+extern "C" ssize_t tsnx_readv(int fd, const iovec *iov, int n) {
+    tsnx::VSock *v = Layer();
+    if (!v || !v->IsVirtual(fd)) return REAL(readv)(fd, iov, n);
+    size_t total = 0;
+    for (int i = 0; i < n; i++) total += iov[i].iov_len;
+    std::vector<char> buf(total);
+    tsnx::Result r = v->Recv(fd, buf.data(), total, 0);
+    for (size_t i = 0, off = 0; r.ret > 0 && off < static_cast<size_t>(r.ret); i++) {
+        size_t c = std::min(iov[i].iov_len, static_cast<size_t>(r.ret) - off);
+        memcpy(iov[i].iov_base, buf.data() + off, c);
+        off += c;
+    }
+    return Traced<ssize_t>("readv", fd, r);
+}
+
+extern "C" ssize_t tsnx_writev(int fd, const iovec *iov, int n) {
+    tsnx::VSock *v = Layer();
+    if (!v || !v->IsVirtual(fd)) return REAL(writev)(fd, iov, n);
+    std::vector<char> buf;
+    for (int i = 0; i < n; i++) buf.insert(buf.end(), static_cast<char *>(iov[i].iov_base), static_cast<char *>(iov[i].iov_base) + iov[i].iov_len);
+    return Traced<ssize_t>("writev", fd, v->Send(fd, buf.data(), buf.size(), 0));
+}
+
 extern "C" int tsnx_fcntl(int fd, int cmd, ...) {
     va_list ap;
     va_start(ap, cmd);
@@ -373,6 +400,8 @@ INTERPOSE(getsockopt);
 INTERPOSE(setsockopt);
 INTERPOSE(read);
 INTERPOSE(write);
+INTERPOSE(readv);
+INTERPOSE(writev);
 INTERPOSE(fcntl);
 INTERPOSE(ioctl);
 INTERPOSE(select);

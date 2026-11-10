@@ -16,6 +16,7 @@ c++ -std=c++17 -shared -fPIC -O1 -g -Wall $inc -o $out/libtsnx_interpose.so \
   $out/tsnx_driver.o $out/tsnx_app.o $out/tsnx_dns.o $out/tsnx_drop.o $out/${RUST_PROFILE_DIR:-debug}/libtsnx_ffi.a -lpthread -ldl -lm
 cc -O1 -g -Wall -o $out/vsock-test native/interpose/vsock_test.c
 cc -O1 -g -Wall -o $out/heap-probe native/interpose/heap_probe.c -ldl
+cc -O1 -g -Wall -o $out/files-probe e2e/files-probe.c -lssh2 -lsmb2
 # A fixed path for the compose service, whichever profile was built.
 mkdir -p $out/bin && cp $out/${RUST_PROFILE_DIR:-debug}/tsnx-host $out/bin/tsnx-host
 echo "built ($RUST_PROFILE_DIR): $out/bin/tsnx-host, $out/libtsnx_interpose.so, $out/vsock-test"
