@@ -51,6 +51,9 @@ const MAX_CANDIDATES: usize = 16;
 /// A peer in use without a direct path this long gets one log line saying
 /// so: it's the usual reason a stream is slow.
 const NO_DIRECT_NOTICE: Duration = Duration::from_secs(30);
+/// While a peer is in use the engine ticks every second; a longer gap means
+/// the console slept, and that time doesn't count towards NO_DIRECT_NOTICE.
+const TICK_GAP: Duration = Duration::from_secs(5);
 
 /// Where a disco packet came from.
 #[derive(Debug, Clone, Copy)]
@@ -147,6 +150,7 @@ pub(super) struct MagicState {
     /// When the running netcheck round ends.
     netcheck_until: Option<Instant>,
     netcheck_next: Instant,
+    last_tick: Instant,
 }
 
 impl MagicState {
@@ -162,6 +166,7 @@ impl MagicState {
             region_latency: alloc::collections::BTreeMap::new(),
             netcheck_until: None,
             netcheck_next: now + Duration::from_secs(3600),
+            last_tick: now,
         }
     }
 }
@@ -476,6 +481,7 @@ impl Engine {
         if now >= self.magic.stun_next {
             self.send_stun();
         }
+        let woke = now.saturating_duration_since(core::mem::replace(&mut self.magic.last_tick, now)) > TICK_GAP;
         let ids: Vec<i64> = self.peers.keys().copied().collect();
         for id in ids {
             if self.peers.get(&id).and_then(|p| p.path.unanswered_since).is_some_and(|t| now.saturating_duration_since(t) >= NO_RESPONSE_REKEY) {
@@ -494,18 +500,19 @@ impl Engine {
                 self.discover(id, false);
             }
             self.relay_tick(id);
-            self.note_no_direct_path(id);
+            self.note_no_direct_path(id, woke);
         }
     }
 
     /// Logs once when a peer in use has had no direct path for
-    /// NO_DIRECT_NOTICE, with what discovery had to work with.
-    fn note_no_direct_path(&mut self, id: i64) {
+    /// NO_DIRECT_NOTICE, with what discovery had to work with. `woke`: the
+    /// first tick after a gap (sleep), which starts the count again.
+    fn note_no_direct_path(&mut self, id: i64, woke: bool) {
         let now = self.now;
         let ours = self.advertised_endpoints().len();
         let home = self.home_derp;
         let Some(p) = self.peers.get_mut(&id) else { return };
-        if !p.path.active(now) || p.path.trusted(now).is_some() {
+        if woke || !p.path.active(now) || p.path.trusted(now).is_some() {
             p.path.relayed_since = None;
             p.path.told_relayed = false;
             return;
@@ -736,21 +743,35 @@ mod tests {
         let start = Instant::from_nanos(1_000_000_000);
         let mut e = super::super::tests::engine(start);
         super::super::tests::add_peer(&mut e, 1, "gaming-pc.tail1234.ts.net.", Some(8), PathState::for_test(Some(start), None));
-        let tick_at = |e: &mut Engine, secs: u64| {
-            e.now = start + Duration::from_secs(secs);
-            e.peers.get_mut(&1).unwrap().path.last_active = Some(e.now);
-            e.magic_tick();
+        // Ticks every second up to `secs`, as the engine does while a peer
+        // is in use.
+        let tick_to = |e: &mut Engine, secs: u64| {
+            let end = start + Duration::from_secs(secs);
+            while e.now < end {
+                e.now = (e.now + Duration::from_secs(1)).min(end);
+                e.peers.get_mut(&1).unwrap().path.last_active = Some(e.now);
+                e.magic_tick();
+            }
             e.peers[&1].path.told_relayed
         };
-        assert!(!tick_at(&mut e, 0));
-        assert!(!tick_at(&mut e, 29));
-        assert!(tick_at(&mut e, 30));
+        assert!(!tick_to(&mut e, 29));
+        assert!(tick_to(&mut e, 31));
         // A direct path resets it, so a later relayed stretch is noted again.
         let addr: SocketAddr = "192.0.2.7:41641".parse().unwrap();
         let now = start + Duration::from_secs(31);
         e.peers.get_mut(&1).unwrap().path.best = Some(BestAddr { addr, latency: Duration::from_millis(4), confirmed: now });
-        assert!(!tick_at(&mut e, 31));
+        e.now = now;
+        e.magic_tick();
         assert_eq!(e.peers[&1].path.relayed_since, None);
+
+        // Time asleep doesn't count: 20 s relayed, a minute's sleep, then
+        // the count starts again on waking.
+        e.peers.get_mut(&1).unwrap().path.best = None;
+        assert!(!tick_to(&mut e, 51));
+        e.now = start + Duration::from_secs(111);
+        e.magic_tick();
+        assert!(!tick_to(&mut e, 140));
+        assert!(tick_to(&mut e, 142));
     }
 
     #[test]
