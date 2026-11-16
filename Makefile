@@ -58,7 +58,7 @@ nro: rust-switch
 # Send the NRO to hbmenu's netloader (press Y on the console first) and stream
 # its stdout back. NXLINK_HOST is the console's IP; broadcast discovery does not
 # work from inside Docker Desktop.
-# Atmosphère's libstratosphere (pinned to the console's Atmosphère, 1.12.0).
+# Atmosphère's libstratosphere (pinned to the console's Atmosphère, 1.12.2).
 LIBSTRAT := third_party/Atmosphere/libraries/libstratosphere/lib/nintendo_nx_arm64_armv8a/release/libstratosphere.a
 # Fixes to Atmosphère's libraries that tailscale-nx needs (see patches/),
 # applied to the submodule before building; a changed patch rebuilds.
