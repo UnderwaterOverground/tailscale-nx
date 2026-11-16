@@ -48,7 +48,8 @@ TARGET		:=	tailscale-nx
 BUILD		:=	build
 SOURCES		:=	source ../../third_party/qrcodegen
 DATA		:=	data
-INCLUDES	:=	include ../../third_party/libtesla/include ../../third_party/qrcodegen ../../native/ctl
+INCLUDES	:=	include ../../third_party/libtesla/include ../../third_party/qrcodegen ../../native/ctl \
+			../../third_party/Atmosphere/libraries/libvapours/include
 
 NO_ICON		:=  1
 

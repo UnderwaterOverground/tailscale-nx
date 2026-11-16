@@ -14,6 +14,10 @@ extern "C" {
 #include "qrcodegen.h"
 }
 #include "tsnx_ctl.h"
+// The newest firmware the sysmodule's Atmosphère libraries know (built from
+// the same tree): on a newer major version they abort before tailscale-nx can
+// log anything (patches/atmosphere-firmware-major-only.patch).
+#include "vapours/ams/ams_target_firmware.h"
 
 namespace {
 
@@ -346,8 +350,24 @@ namespace {
     char g_not_started[200] = {};  // why it declined to start (too little memory)
     bool g_no_boot_flag = false;
     bool g_disabled = false;
+    char g_fw_too_new[16] = {};  // the console's firmware, if this build can't run on it
+    char g_fw_max[16] = {};      // what it runs on, e.g. "23.x"
+
+    // Same test as our patched libstratosphere's (hos_version_api.cpp): a
+    // newer minor or micro version is fine, a newer major one aborts the
+    // sysmodule.
+    void CheckFirmware() {
+        constexpr u32 MaxMajor = (ATMOSPHERE_TARGET_FIRMWARE_MAX >> 24) & 0xFF;
+        g_fw_too_new[0] = 0;
+        std::snprintf(g_fw_max, sizeof g_fw_max, "%u.x", MaxMajor);
+        SetSysFirmwareVersion fw = {};
+        if (R_FAILED(setsysGetFirmwareVersion(&fw))) return;  // Tesla opened setsys
+        if (fw.major > MaxMajor)
+            std::snprintf(g_fw_too_new, sizeof g_fw_too_new, "%u.%u.%u", fw.major, fw.minor, fw.micro);
+    }
 
     void ReadWhyNotRunning() {
+        CheckFirmware();
         tsl::hlp::doWithSDCardHandle([] {
             g_crashed[0] = 0;
             if (FILE *f = std::fopen(CrashedPath, "r")) {
@@ -402,7 +422,13 @@ namespace {
                 if (!SysmoduleRunning()) {
                     SetPhase(Phase::Idle);
                     ReadWhyNotRunning();
-                    if (g_we_started) Say("It stopped right away. See", "config/tailscale-nx/sysmodule.log.");
+                    if (g_we_started && g_fw_too_new[0]) {
+                        char line[64];
+                        std::snprintf(line, sizeof line, "It can't run on firmware %s.", g_fw_too_new);
+                        Say(line, "Update tailscale-nx.");
+                    } else if (g_we_started) {
+                        Say("It stopped right away. See", "config/tailscale-nx/sysmodule.log.");
+                    }
                     g_we_started = false;
                 } else if (g_have_ctl) {  // the ctl thread opens the session
                     SetPhase(Phase::Idle);
@@ -613,7 +639,13 @@ namespace {
         r->drawString(state, false, x + 20, y + 40, 30, r->a(color));
         char line[128];
         if (!g_status_ok) {
-            if (g_crashed[0]) {
+            if (g_fw_too_new[0]) {
+                // Checked first: nothing else can apply, it never got to run.
+                std::snprintf(line, sizeof line, "This version runs on firmware up to %s,", g_fw_max);
+                r->drawString(line, false, x + 20, y + 75, 17, r->a(Grey));
+                std::snprintf(line, sizeof line, "not %s. Update tailscale-nx.", g_fw_too_new);
+                r->drawString(line, false, x + 20, y + 100, 17, r->a(Grey));
+            } else if (g_crashed[0]) {
                 // "tailscale-nx stopped itself: <why>." -> show the reason.
                 const char *why = std::strstr(g_crashed, ": ");
                 why = why ? why + 2 : g_crashed;

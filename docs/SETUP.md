@@ -274,6 +274,10 @@ sockets use more of that heap, up to the `overlay_budget_kb` limit.
 ## Troubleshooting
 
 - **The overlay says the sysmodule isn't running.**
+  - If it says which firmware this version runs on, the console's firmware
+    is newer than that: update tailscale-nx. A new major firmware (24.0,
+    say) needs a new tailscale-nx built for it, which can take a few days
+    after Atmosphère supports it; minor updates (23.5 to 23.6) don't.
   - Check that `atmosphere/contents/4200000000005453/flags/boot2.flag`
     exists.
   - If `config/tailscale-nx/crashed` exists, tailscale-nx turned itself off.
