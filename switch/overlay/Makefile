@@ -42,7 +42,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 APP_TITLE	:=	Tailscale
 APP_AUTHOR	:=	UnderwaterOverground
-APP_VERSION :=	1.3.0
+APP_VERSION :=	1.3.1
 
 TARGET		:=	tailscale-nx
 BUILD		:=	build
