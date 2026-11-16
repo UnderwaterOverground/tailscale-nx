@@ -173,6 +173,15 @@ match `switch/overlay/Makefile` and `switch/sysmodule/res/app.json`.
 Pushing a `v*` tag builds and publishes the same zip on GitHub
 (`.github/workflows/publish.yml`).
 
+The sysmodule's Atmosphère libraries (`third_party/Atmosphere`) refuse to
+start on firmware with a newer major version than they know, before
+anything is logged; the overlay then says which firmware the build runs on.
+(Unpatched, they refuse a newer minor version too;
+`patches/atmosphere-firmware-major-only.patch` relaxes that, so 23.0's
+build also runs on 23.5. If a minor update did break something, the crash
+guard turns tailscale-nx off after three crashed boots.) So a new major
+firmware needs a release built with an Atmosphère that knows it.
+
 ## Notes and findings
 
 - **Disco keys are persisted.** Go clients make a new disco key every run,
