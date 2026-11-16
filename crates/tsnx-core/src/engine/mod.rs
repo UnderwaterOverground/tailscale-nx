@@ -107,6 +107,8 @@ struct DerpNode {
 enum Owner {
     Control(ConnId),
     Derp(u32),
+    /// A TCP connect that times this DERP region (magic.rs).
+    Probe(u32),
 }
 
 struct DerpConn {
@@ -431,6 +433,7 @@ impl Engine {
                 let region = *region;
                 self.derp_connected(region);
             }
+            Some(Owner::Probe(_)) => self.tcp_probe_done(id, true),
             None => {}
         }
         self.pump();
@@ -444,7 +447,7 @@ impl Engine {
                 let region = *region;
                 self.derp_data(region, data);
             }
-            None => {}
+            Some(Owner::Probe(_)) | None => {}
         }
         self.pump();
     }
@@ -462,6 +465,7 @@ impl Engine {
                     self.derp_disconnected(region, "DERP connection closed");
                 }
             }
+            Some(Owner::Probe(_)) => self.tcp_probe_done(id, false),
             None => {}
         }
         self.pump();
@@ -1081,6 +1085,8 @@ mod tests {
     const HOME: u32 = 1;
 
     pub(super) fn engine(now: Instant) -> Engine {
+        // Disco pings and STUN need it; other tests seed it only when they run first.
+        crate::rng::seed(&[5; 32]);
         let cfg = EngineConfig {
             control: ControlConfig { url: "http://control.test".into(), auth_key: None, hostname: "test".into(), extra_roots: Vec::new() },
             machine_private: [1; 32],

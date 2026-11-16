@@ -40,6 +40,13 @@ const STUN_RETRY: Duration = Duration::from_secs(3);
 /// A netcheck round waits this long for STUN replies from all regions.
 const NETCHECK_WINDOW: Duration = Duration::from_millis(1500);
 const NETCHECK_INTERVAL: Duration = Duration::from_secs(300);
+/// With no STUN replies (UDP blocked), regions are timed by a TCP connect
+/// to their DERP server instead (Go uses HTTPS), one at a time: on the
+/// console each TCP socket takes 32 KB of the shared socket memory.
+const TCP_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+/// Connect times this close together across 3+ regions mean they were
+/// answered locally (see finish_tcp_probe).
+const TCP_PROBE_UNIFORM: Duration = Duration::from_millis(10);
 /// WireGuard: if data was sent but nothing received for KEEPALIVE_TIMEOUT +
 /// REKEY_TIMEOUT, start a new handshake (ts_tunnel doesn't implement this).
 const NO_RESPONSE_REKEY: Duration = Duration::from_secs(15);
@@ -151,6 +158,15 @@ pub(super) struct MagicState {
     netcheck_until: Option<Instant>,
     netcheck_next: Instant,
     last_tick: Instant,
+    /// The running TCP timing round (see TCP_PROBE_TIMEOUT).
+    tcp_probe: Option<TcpProbe>,
+}
+
+pub(super) struct TcpProbe {
+    /// Regions are timed in id order: the last one started.
+    last: Option<u32>,
+    /// The connect being timed: (connection, region, started).
+    current: Option<(super::ConnId, u32, Instant)>,
 }
 
 impl MagicState {
@@ -167,6 +183,7 @@ impl MagicState {
             netcheck_until: None,
             netcheck_next: now + Duration::from_secs(3600),
             last_tick: now,
+            tcp_probe: None,
         }
     }
 }
@@ -478,6 +495,11 @@ impl Engine {
         } else if self.magic.netcheck_until.is_none() && now >= self.magic.netcheck_next {
             self.start_netcheck();
         }
+        if let Some((id, _, sent)) = self.magic.tcp_probe.as_ref().and_then(|p| p.current) {
+            if now >= sent + TCP_PROBE_TIMEOUT {
+                self.tcp_probe_done(id, false);
+            }
+        }
         if now >= self.magic.stun_next {
             self.send_stun();
         }
@@ -536,6 +558,9 @@ impl Engine {
         if let Some(n) = self.magic.netcheck_until {
             t = t.min(n);
         }
+        if let Some((_, _, sent)) = self.magic.tcp_probe.as_ref().and_then(|p| p.current) {
+            t = t.min(sent + TCP_PROBE_TIMEOUT);
+        }
         for p in self.peers.values() {
             if let Some(u) = p.path.unanswered_since {
                 t = t.min(u + NO_RESPONSE_REKEY);
@@ -575,15 +600,14 @@ impl Engine {
 
     /// Probes every region's STUN server to measure latency (Go: netcheck).
     pub(super) fn start_netcheck(&mut self) {
+        self.stop_tcp_probe();
         let regions: Vec<u32> = self.derp_nodes.keys().copied().collect();
         let probed = regions.into_iter().filter(|r| self.stun_probe(*r)).count();
         self.magic.region_latency.clear();
         if probed == 0 {
-            // No STUN anywhere: fall back to the lowest region id.
-            if let Some(&r) = self.derp_nodes.keys().next() {
-                self.set_home_derp(r);
-            }
+            // No STUN anywhere: time the regions over TCP.
             self.magic.netcheck_next = self.now + NETCHECK_INTERVAL;
+            self.start_tcp_probe();
             return;
         }
         log::debug!("netcheck: probing {probed} regions");
@@ -597,7 +621,6 @@ impl Engine {
         self.magic.netcheck_next = self.now + NETCHECK_INTERVAL;
         let lat = &self.magic.region_latency;
         let best = lat.iter().min_by_key(|(_, d)| **d).map(|(r, d)| (*r, *d));
-        let current = self.home_derp.and_then(|r| lat.get(&r).copied());
         log::info!(
             "netcheck: {} of {} regions answered; best {:?}",
             lat.len(),
@@ -624,8 +647,21 @@ impl Engine {
             self.magic.public_endpoints = seen;
             self.update_endpoints();
         }
+        if best.is_none() {
+            // No STUN replies: UDP is blocked, or every probe was lost.
+            self.start_tcp_probe();
+        } else {
+            self.choose_home_from_latency();
+        }
+    }
+
+    /// Moves home to the region with the lowest measured latency, if that's
+    /// a clear improvement on the current one.
+    fn choose_home_from_latency(&mut self) {
+        let lat = &self.magic.region_latency;
+        let best = lat.iter().min_by_key(|(_, d)| **d).map(|(r, d)| (*r, *d));
+        let current = self.home_derp.and_then(|r| lat.get(&r).copied());
         let choice = match (best, current) {
-            (None, None) if self.home_derp.is_none() => self.derp_nodes.keys().next().copied(),
             (None, _) => None,
             (Some((r, _)), None) => Some(r),
             // Only move for a clear improvement (Go uses a similar hysteresis).
@@ -634,6 +670,80 @@ impl Engine {
         };
         if let Some(r) = choice {
             self.set_home_derp(r);
+        }
+    }
+
+    /// Times each region by a TCP connect to its DERP server, one after
+    /// another. Until it finishes, home stays where it is, or (with none
+    /// yet) is the lowest region id, so peers can reach us meanwhile.
+    /// Called with no round running and region_latency empty (netcheck).
+    fn start_tcp_probe(&mut self) {
+        if self.home_derp.is_none() {
+            if let Some(&r) = self.derp_nodes.keys().next() {
+                self.set_home_derp(r);
+            }
+        }
+        self.magic.tcp_probe = Some(TcpProbe { last: None, current: None });
+        // Finishing is left to tcp_probe_done: this runs on bsd:u MITM
+        // threads (a map arriving), whose stacks are small.
+        if !self.tcp_probe_connect() {
+            self.magic.tcp_probe = None;
+        }
+    }
+
+    /// Starts timing the next region, if any are left.
+    fn tcp_probe_connect(&mut self) -> bool {
+        let Some(last) = self.magic.tcp_probe.as_ref().map(|p| p.last) else { return false };
+        let Some((&region, node)) = self.derp_nodes.iter().find(|(r, _)| last.is_none_or(|l| **r > l)) else { return false };
+        let (host, port) = (node.connect_host.clone(), node.port);
+        let id = self.alloc_conn(super::Owner::Probe(region));
+        self.io.push_back(Io::Connect { id, host, port });
+        if let Some(p) = self.magic.tcp_probe.as_mut() {
+            p.last = Some(region);
+            p.current = Some((id, region, self.now));
+        }
+        true
+    }
+
+    fn finish_tcp_probe(&mut self) {
+        self.magic.tcp_probe = None;
+        let lat = &self.magic.region_latency;
+        let best = lat.iter().min_by_key(|(_, d)| **d);
+        let worst = lat.values().max();
+        // Regions span continents. If they all answer alike, something
+        // nearby (a firewall or proxy) is answering for them: no information.
+        let alike = lat.len() >= 3 && matches!((best, worst), (Some((_, lo)), Some(hi)) if *hi - *lo < TCP_PROBE_UNIFORM);
+        log::info!(
+            "netcheck (TCP): {} of {} regions answered; best {best:?}, worst {worst:?}{}",
+            lat.len(),
+            self.derp_nodes.len(),
+            if alike { "; all alike, ignored" } else { "" }
+        );
+        if !alike {
+            self.choose_home_from_latency();
+        }
+    }
+
+    /// Probe connection `id` connected (timed) or failed (closed or timed out).
+    pub(super) fn tcp_probe_done(&mut self, id: super::ConnId, connected: bool) {
+        self.owners.remove(&id);
+        let Some(p) = self.magic.tcp_probe.as_mut() else { return };
+        let Some((cur, region, sent)) = p.current.filter(|c| c.0 == id) else { return };
+        p.current = None;
+        if connected {
+            self.magic.region_latency.insert(region, self.now.saturating_duration_since(sent));
+        }
+        // Harmless if the driver already closed it.
+        self.io.push_back(Io::Close { id: cur });
+        if !self.tcp_probe_connect() {
+            self.finish_tcp_probe();
+        }
+    }
+
+    fn stop_tcp_probe(&mut self) {
+        if let Some((id, _, _)) = self.magic.tcp_probe.take().and_then(|p| p.current) {
+            self.owners.remove(&id);
+            self.io.push_back(Io::Close { id });
         }
     }
 
@@ -736,6 +846,127 @@ mod tests {
         // Shown only while fresh.
         e.now = start + RELAY_LATENCY_FRESH + Duration::from_secs(1);
         assert_eq!(e.active_peers()[0].latency, None);
+    }
+
+    /// An engine homed in region 1 of regions 1-3, each with a STUN server.
+    fn three_regions(now: Instant) -> Engine {
+        let mut e = super::super::tests::engine(now);
+        for r in 1..=3u32 {
+            let stun = Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, r as u8)), 3478));
+            let node = super::super::DerpNode { hostname: alloc::format!("derp{r}.test"), connect_host: alloc::format!("192.0.2.{r}"), port: 443, stun };
+            e.derp_nodes.insert(r, node);
+        }
+        e
+    }
+
+    /// The probe connect the engine just asked for: (connection, region).
+    fn probe_connect(e: &mut Engine) -> Option<(super::super::ConnId, u32)> {
+        let io: Vec<Io> = core::iter::from_fn(|| e.poll_io()).collect();
+        io.iter().find_map(|io| match io {
+            Io::Connect { id, .. } => match e.owners.get(id) {
+                Some(super::super::Owner::Probe(r)) => Some((*id, *r)),
+                _ => None,
+            },
+            _ => None,
+        })
+    }
+
+    /// Runs a netcheck round that no STUN server answers.
+    fn netcheck_without_stun(e: &mut Engine) {
+        e.start_netcheck();
+        e.handle_timeout(e.now + NETCHECK_WINDOW);
+    }
+
+    #[test]
+    fn without_stun_regions_are_timed_over_tcp() {
+        let start = Instant::from_nanos(1_000_000_000);
+        let mut e = three_regions(start);
+        netcheck_without_stun(&mut e);
+
+        // One region at a time, in order. Region 1 connects in 300 ms.
+        let (id, r) = probe_connect(&mut e).expect("a TCP probe");
+        assert_eq!(r, 1);
+        let t = e.now + Duration::from_millis(300);
+        e.handle_connected(id, t);
+        // Region 2 in 40 ms.
+        let (id, r) = probe_connect(&mut e).expect("a second probe");
+        assert_eq!(r, 2);
+        e.handle_connected(id, t + Duration::from_millis(40));
+        // Region 3 never answers.
+        let (id3, r) = probe_connect(&mut e).expect("a third probe");
+        assert_eq!(r, 3);
+        assert_eq!(e.next_deadline(), t + Duration::from_millis(40) + TCP_PROBE_TIMEOUT);
+        e.handle_timeout(t + Duration::from_millis(40) + TCP_PROBE_TIMEOUT);
+
+        assert_eq!(e.home_derp, Some(2));
+        assert!(e.magic.tcp_probe.is_none());
+        assert!(!e.owners.values().any(|o| matches!(o, super::super::Owner::Probe(_))));
+        // A late answer from region 3 changes nothing.
+        e.handle_connected(id3, e.now);
+        assert_eq!(e.home_derp, Some(2));
+    }
+
+    #[test]
+    fn tcp_timing_keeps_home_without_a_clear_win() {
+        let start = Instant::from_nanos(1_000_000_000);
+        let mut e = three_regions(start);
+        netcheck_without_stun(&mut e);
+        // Region 1 (home) connects in 50 ms, region 2 in 40.
+        for ms in [50, 40] {
+            let (id, _) = probe_connect(&mut e).unwrap();
+            e.handle_connected(id, e.now + Duration::from_millis(ms));
+        }
+        // Region 3's connect fails at once.
+        let (id, _) = probe_connect(&mut e).unwrap();
+        e.handle_closed(id, e.now);
+        assert!(e.magic.tcp_probe.is_none());
+        assert_eq!(e.home_derp, Some(1));
+    }
+
+    #[test]
+    fn without_a_home_the_lowest_region_serves_until_timed() {
+        let start = Instant::from_nanos(1_000_000_000);
+        let mut e = three_regions(start);
+        e.home_derp = None;
+        netcheck_without_stun(&mut e);
+        assert_eq!(e.home_derp, Some(1));
+        // Region 1 in 200 ms, region 2 fails, region 3 in 30 ms.
+        for (ms, ok) in [(200, true), (0, false), (30, true)] {
+            let (id, _) = probe_connect(&mut e).unwrap();
+            let at = e.now + Duration::from_millis(ms);
+            if ok {
+                e.handle_connected(id, at);
+            } else {
+                e.handle_closed(id, at);
+            }
+        }
+        assert_eq!(e.home_derp, Some(3));
+    }
+
+    #[test]
+    fn tcp_timing_ignores_regions_that_answer_alike() {
+        let start = Instant::from_nanos(1_000_000_000);
+        let mut e = three_regions(start);
+        netcheck_without_stun(&mut e);
+        // A firewall answering every connect itself: 4, 2 and 6 ms.
+        for ms in [4, 2, 6] {
+            let (id, _) = probe_connect(&mut e).unwrap();
+            e.handle_connected(id, e.now + Duration::from_millis(ms));
+        }
+        assert!(e.magic.tcp_probe.is_none());
+        assert_eq!(e.home_derp, Some(1));
+    }
+
+    #[test]
+    fn a_new_netcheck_stops_tcp_timing() {
+        let start = Instant::from_nanos(1_000_000_000);
+        let mut e = three_regions(start);
+        netcheck_without_stun(&mut e);
+        let (id, _) = probe_connect(&mut e).unwrap();
+        e.start_netcheck();
+        let io: Vec<Io> = core::iter::from_fn(|| e.poll_io()).collect();
+        assert!(io.iter().any(|io| matches!(io, Io::Close { id: c } if *c == id)));
+        assert!(e.magic.tcp_probe.is_none() && !e.owners.contains_key(&id));
     }
 
     #[test]

@@ -234,4 +234,27 @@ fi
 id=$(node_id "$CTL"); [[ -n "$id" ]] && hs nodes delete -i "$id" --force >/dev/null
 docker rm -f "$CTL" >/dev/null 2>&1
 
+# 12. UDP blocked outright (as on some work and school networks): no STUN
+# replies, so the DERP region is timed over TCP instead, and traffic still
+# flows through DERP.
+NOUDP=tsnx-e2e-noudp
+docker rm -f "$NOUDP" >/dev/null 2>&1
+docker run --rm -v "$PWD/state:/s" alpine rm -f /s/host/noudp-e2e.state
+docker compose run --rm -T -d --name "$NOUDP" --entrypoint sh tsnx -c \
+  "iptables -A OUTPUT -p udp ! -d 127.0.0.0/8 -j DROP && exec /src/target/linux/bin/tsnx-host up \
+   --control https://headscale --authkey $(cat state/authkey) --hostname $NOUDP \
+   --state /state/host/noudp-e2e.state --port 41649" >/dev/null
+if wait_log "$NOUDP" "netcheck (TCP): 1 of 1 regions answered" 30; then
+  NOUDP_IP=$(peer tailscale status --json | python3 -c "import json,sys; print(next((p['TailscaleIPs'][0] for p in json.load(sys.stdin)['Peer'].values() if p['HostName']=='$NOUDP'), ''))")
+  if [[ -n $NOUDP_IP ]] && peer ping -c 5 -W 3 "$NOUDP_IP" >/dev/null; then
+    pass "UDP blocked: DERP timed over TCP"
+  else
+    fail "UDP blocked: no traffic over DERP (see docker logs $NOUDP)"
+  fi
+else
+  fail "UDP blocked: no TCP timing round (see docker logs $NOUDP)"
+fi
+id=$(node_id "$NOUDP"); [[ -n "$id" ]] && hs nodes delete -i "$id" --force >/dev/null
+docker rm -f "$NOUDP" >/dev/null 2>&1
+
 [[ $fails -eq 0 ]] && echo "all e2e tests passed" || { echo "$fails e2e test(s) failed"; exit 1; }
