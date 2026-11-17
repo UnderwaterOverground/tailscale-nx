@@ -38,6 +38,17 @@ void tsnx_driver_refresh_endpoints(TsnxDriver *d);
 void tsnx_driver_suspend(TsnxDriver *d);
 int tsnx_driver_resume(TsnxDriver *d);
 
+// The socket service drops every socket when the network goes away without
+// a sleep (Airplane Mode on the Switch). The driver notices on its own (a
+// send or receive saying the socket is gone, or poll() reporting it
+// invalid), closes the UDP socket and opens another on the same port, at
+// most once a second. tsnx_driver_reopen_udp does that now, e.g. when the
+// network returns (0, or -1: retried later); reopens counts the ones opened.
+int tsnx_driver_reopen_udp(TsnxDriver *d);
+unsigned int tsnx_driver_udp_reopens(const TsnxDriver *d);
+// The UDP socket's port, or 0 while there's none.
+uint16_t tsnx_driver_udp_port(const TsnxDriver *d);
+
 // Optional address rewrites for development, "host:port=ip:port,..." (e.g.
 // reaching a container hostname through a published port). Copied.
 void tsnx_driver_set_connect_map(TsnxDriver *d, const char *map);

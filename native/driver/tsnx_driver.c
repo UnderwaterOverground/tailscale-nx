@@ -40,6 +40,9 @@ int tsnx_snprintf(char *dst, size_t size, const char *fmt, ...);
 #define UDP_SLOT 2048
 #define SBUF_SIZE (UDP_STAGED * UDP_SLOT)
 
+// A dropped UDP socket is reopened at most this often.
+#define REOPEN_EVERY_NS 1000000000ull
+
 static const char *volatile g_step;
 #define STEP(s) (g_step = (s))
 const char *tsnx_driver_step(void) { return g_step; }
@@ -84,7 +87,23 @@ struct TsnxDriver {
     // socket service's errno, if a call failed); misses: batches that came
     // back empty while recvfrom then found a datagram.
     int mmsg_state, mmsg_errno, mmsg_misses;
+    // The socket service dropped the UDP socket (it does when the network
+    // goes away without a sleep, e.g. Airplane Mode): sends fail with EPIPE
+    // and poll() reports it invalid at once, every round. Set wherever that
+    // shows (also by callers' sends, and by the prefetch without the
+    // caller's lock: hence atomic); the next dispatch closes the socket, and
+    // tsnx_driver_prepare reopens it at most once a second.
+    int broken;
+    uint64_t reopen_at_ns;    // when to open another (0: none due)
+    uint64_t last_reopen_ns;  // when one was last tried
+    unsigned int reopens;     // how many were opened
 };
+
+// Errors that mean the socket itself is gone, not that a datagram failed
+// (ENETUNREACH while offline, say).
+static int socket_gone(int e) { return e == EPIPE || e == EBADF || e == ENOTSOCK || e == ENOTCONN; }
+static void mark_broken(TsnxDriver *d) { __atomic_store_n(&d->broken, 1, __ATOMIC_RELAXED); }
+static int is_broken(const TsnxDriver *d) { return __atomic_load_n(&d->broken, __ATOMIC_RELAXED); }
 
 uint64_t tsnx_driver_now_ns(void) {
     struct timespec ts;
@@ -257,13 +276,20 @@ int tsnx_driver_open_udp(TsnxDriver *d, uint16_t port) {
     return 0;
 }
 
+static void close_udp(TsnxDriver *d) {
+    if (d->udp_fd >= 0) close(d->udp_fd);
+    d->udp_fd = -1;
+    d->n_staged = 0;
+    d->staged_all = 0;
+    d->prefetched = 0;
+    __atomic_store_n(&d->broken, 0, __ATOMIC_RELAXED);
+}
+
 void tsnx_driver_suspend(TsnxDriver *d) {
     for (int i = 0; i < MAX_CONNS; i++)
         if (d->conns[i].id) conn_closed(d, &d->conns[i]);
-    if (d->udp_fd >= 0) {
-        close(d->udp_fd);
-        d->udp_fd = -1;
-    }
+    close_udp(d);
+    d->reopen_at_ns = 0;
 }
 
 int tsnx_driver_resume(TsnxDriver *d) {
@@ -271,6 +297,24 @@ int tsnx_driver_resume(TsnxDriver *d) {
     // Same port as before, so peers' notion of our endpoint stays valid.
     return tsnx_driver_open_udp(d, d->udp_port) == 0 ? 0 : tsnx_driver_open_udp(d, 0);
 }
+
+int tsnx_driver_reopen_udp(TsnxDriver *d) {
+    if (!d->udp_port) return -1;  // never had one
+    STEP("UDP reopen");
+    close_udp(d);
+    d->last_reopen_ns = tsnx_driver_now_ns();
+    if (tsnx_driver_resume(d) == 0) {
+        d->reopen_at_ns = 0;
+        d->reopens++;
+        return 0;
+    }
+    d->reopen_at_ns = d->last_reopen_ns + REOPEN_EVERY_NS;  // e.g. still offline
+    return -1;
+}
+
+unsigned int tsnx_driver_udp_reopens(const TsnxDriver *d) { return d->reopens; }
+
+uint16_t tsnx_driver_udp_port(const TsnxDriver *d) { return d->udp_fd >= 0 ? d->udp_port : 0; }
 
 static void udp_send(TsnxDriver *d, const TsnxAddr *to, const uint8_t *data, size_t len) {
     STEP("UDP send");
@@ -280,7 +324,7 @@ static void udp_send(TsnxDriver *d, const TsnxAddr *to, const uint8_t *data, siz
     memcpy(&sin.sin_addr, to->ip, 4);
     sin.sin_port = htons(to->port);
     // Best effort, like any UDP send: a full socket buffer drops the datagram.
-    sendto(d->udp_fd, data, len, 0, (struct sockaddr *)&sin, sizeof sin);
+    if (sendto(d->udp_fd, data, len, 0, (struct sockaddr *)&sin, sizeof sin) < 0 && socket_gone(errno)) mark_broken(d);
 }
 
 // Reads one datagram into buf. Returns its length, or -1 when there's
@@ -290,6 +334,7 @@ static ssize_t udp_read(TsnxDriver *d, uint8_t *buf, size_t cap, TsnxAddr *src) 
     socklen_t flen = sizeof from;
     memset(&from, 0, sizeof from);
     ssize_t got = recvfrom(d->udp_fd, buf, cap, 0, (struct sockaddr *)&from, &flen);
+    if (got < 0 && socket_gone(errno)) mark_broken(d);
     if (got < 0 || from.sin_family != AF_INET) return -1;
     to_tsnx_addr(&from, src);
     return got;
@@ -320,6 +365,8 @@ static int stage_each(TsnxDriver *d) {
 #define MMSG_CAP ((SBUF_SIZE - 1) / UDP_STAGED - MMSG_HEAD - MMSG_TAIL)
 _Static_assert(MMSG_CAP >= 1500, "batched receive slots must hold a full datagram");
 #define BSD_EAGAIN 11  // the socket service's errno numbering (Linux's)
+// socket_gone()'s errors, in that numbering.
+static int bsd_socket_gone(int e) { return e == 32 /* EPIPE */ || e == 9 /* EBADF */ || e == 88 /* ENOTSOCK */ || e == 107 /* ENOTCONN */; }
 
 static void put(uint8_t **p, const void *v, size_t n) {
     memcpy(*p, v, n);
@@ -423,6 +470,10 @@ static int stage(TsnxDriver *d) {
             d->mmsg_state = 1;
             return n;
         }
+        if (n < 0 && bsd_socket_gone(err)) {
+            mark_broken(d);  // the socket, not batching, is what failed
+            return 0;
+        }
         if (n < 0 && err != BSD_EAGAIN) {
             d->mmsg_state = -1;  // unsupported here: one datagram per call
             d->mmsg_errno = err;
@@ -440,11 +491,24 @@ static int stage(TsnxDriver *d) {
     return stage_each(d);
 }
 
+// Whether poll() says the UDP socket is gone. An error left by an ICMP
+// message (port unreachable and the like) is only cleared, by reading
+// SO_ERROR: otherwise every poll() would return at once for it.
+static int udp_poll_gone(TsnxDriver *d, short revents) {
+    if (revents & POLLNVAL) return 1;
+    if (!(revents & (POLLERR | POLLHUP))) return 0;
+    int err = 0;
+    socklen_t len = sizeof err;
+    return getsockopt(d->udp_fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0 ? socket_gone(errno) : socket_gone(err);
+}
+
 void tsnx_driver_prefetch(TsnxDriver *d, const struct pollfd *fds) {
     d->n_staged = 0;
     d->staged_all = 0;
     d->prefetched = 1;
-    if (d->poll_udp < 0 || !(fds[d->poll_udp].revents & POLLIN)) return;
+    if (d->poll_udp < 0) return;
+    if (udp_poll_gone(d, fds[d->poll_udp].revents)) mark_broken(d);
+    if (is_broken(d) || !(fds[d->poll_udp].revents & POLLIN)) return;
     STEP("UDP prefetch");
     d->n_staged = stage(d);
     d->staged_all = d->n_staged < UDP_STAGED;
@@ -656,6 +720,9 @@ static short conn_events(const Conn *c) { return POLLIN | (c->connecting || c->w
 
 int tsnx_driver_prepare(TsnxDriver *d, struct pollfd *fds, int cap, int max_wait_ms, int *wait_ms) {
     uint64_t now = tsnx_driver_now_ns();
+    // A dropped UDP socket (closed by the last dispatch): a new one on the
+    // same port, so peers' notion of our endpoint stays valid.
+    if (d->udp_fd < 0 && d->reopen_at_ns && now >= d->reopen_at_ns) tsnx_driver_reopen_udp(d);
     if (now >= tsnx_engine_next_deadline(d->engine)) tsnx_engine_timeout(d->engine, now);
     pump_engine(d);
 
@@ -684,6 +751,7 @@ int tsnx_driver_prepare(TsnxDriver *d, struct pollfd *fds, int cap, int max_wait
 
     uint64_t deadline = tsnx_engine_next_deadline(d->engine);
     d->poll_deadline = deadline;
+    if (d->udp_fd < 0 && d->reopen_at_ns && d->reopen_at_ns < deadline) deadline = d->reopen_at_ns;
     now = tsnx_driver_now_ns();
     int wait = max_wait_ms;
     if (deadline <= now) {
@@ -711,8 +779,19 @@ int tsnx_driver_poll_stale(TsnxDriver *d, uint64_t until_ns) {
     return deadline < d->poll_deadline && deadline < until_ns;
 }
 
+// Closes a UDP socket found dropped, so that poll() stops returning at once
+// for it; tsnx_driver_prepare opens another, at most once a second.
+static void retire_broken_udp(TsnxDriver *d) {
+    if (!is_broken(d) || d->udp_fd < 0) return;
+    close_udp(d);
+    const uint64_t now = tsnx_driver_now_ns();
+    const uint64_t next = d->last_reopen_ns ? d->last_reopen_ns + REOPEN_EVERY_NS : now;
+    d->reopen_at_ns = next > now ? next : now;
+}
+
 void tsnx_driver_dispatch(TsnxDriver *d, const struct pollfd *fds) {
-    if (d->poll_udp >= 0 && (fds[d->poll_udp].revents & POLLIN)) {
+    if (d->poll_udp >= 0 && !d->prefetched && udp_poll_gone(d, fds[d->poll_udp].revents)) mark_broken(d);
+    if (d->poll_udp >= 0 && !is_broken(d) && (fds[d->poll_udp].revents & POLLIN)) {
         udp_receive(d);
         pump_engine(d);
     }
@@ -755,6 +834,7 @@ void tsnx_driver_dispatch(TsnxDriver *d, const struct pollfd *fds) {
         if (!c->connecting && c->wlen > 0 && conn_flush(c) != 0) conn_closed(d, c);
     }
     pump_engine(d);
+    retire_broken_udp(d);
 }
 
 int tsnx_driver_run_once(TsnxDriver *d, int max_wait_ms) {

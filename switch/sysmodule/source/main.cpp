@@ -188,6 +188,9 @@ namespace ams {
         constinit bool g_log_open = false;
         constinit s64 g_log_offset = 0;
         constinit int g_log_udp_fd = -1;
+        // The socket service dropped the log socket (the network went away
+        // without a sleep); the engine loop's network check opens another.
+        constinit std::atomic<bool> g_log_udp_lost = false;
         // While the console sleeps, logging must not touch the socket service
         // (it may be asleep and block the caller): file only.
         constinit std::atomic<bool> g_log_udp_paused = false;
@@ -245,7 +248,13 @@ namespace ams {
             for (size_t off = 0; off < n;) {
                 const char *nl = static_cast<const char *>(std::memchr(lines + off, '\n', n - off));
                 const size_t len = nl ? static_cast<size_t>(nl - (lines + off)) + 1 : n - off;
-                ::sendto(g_log_udp_fd, lines + off, len, 0, reinterpret_cast<sockaddr *>(std::addressof(g_log_udp_addr)), sizeof g_log_udp_addr);
+                if (::sendto(g_log_udp_fd, lines + off, len, 0, reinterpret_cast<sockaddr *>(std::addressof(g_log_udp_addr)), sizeof g_log_udp_addr) < 0 &&
+                    (errno == EPIPE || errno == EBADF || errno == ENOTSOCK || errno == ENOTCONN)) {
+                    ::close(g_log_udp_fd);
+                    g_log_udp_fd = -1;
+                    g_log_udp_lost = true;
+                    return;
+                }
                 off += len;
             }
         }
@@ -574,7 +583,7 @@ namespace ams {
             }
         }
 
-        void OpenUdpLogSocket();
+        bool OpenUdpLogSocket();
 
         void SetUpUdpLog(const char *target) {
             char host[48];
@@ -636,16 +645,20 @@ namespace ams {
             g_log_udp_fd = -1;
         }
 
-        void OpenUdpLogSocket() {
-            if (g_log_udp_addr.sin_family != AF_INET || g_log_tailnet) return;
+        // Returns false if it couldn't (no socket).
+        bool OpenUdpLogSocket() {
+            if (g_log_udp_addr.sin_family != AF_INET || g_log_tailnet) return true;
             const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-            if (fd < 0) return;
+            if (fd < 0) return false;
             // Send-only: keep its share of the socket buffer pool small.
             const int rcv = 0x1000, snd = 0x2000;
             ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof rcv);
             ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, sizeof snd);
             std::scoped_lock lk(g_log_mutex);
+            if (g_log_udp_fd >= 0) ::close(g_log_udp_fd);
             g_log_udp_fd = fd;
+            g_log_udp_lost = false;
+            return true;
         }
 
         // Sends the lines logged so far over UDP, once the network is up (at
@@ -1154,6 +1167,7 @@ namespace ams {
         // to the SD card.
         bool network_check_due = false, network_checked = false, hosts_due = false;
         u32 network_ip = 0;
+        bool udp_fresh = false;  // the UDP socket was opened since we last had an address (it was opened with one)
         rt->SetSuspendHooks([] {
             {
                 std::scoped_lock lk(g_log_mutex);
@@ -1161,10 +1175,11 @@ namespace ams {
             }
             CloseUdpLogSocket();
             SuspendUpdateCheck();
-        }, [&ip, &network_checked] {
+        }, [&ip, &network_checked, &udp_fresh] {
             network_checked = false;  // from before the sleep
+            udp_fresh = true;
             g_tailnet_log_hold_until_ns = armTicksToNs(armGetSystemTick()) + 10'000'000'000ull;
-            OpenUdpLogSocket();
+            if (!OpenUdpLogSocket()) g_log_udp_lost = true;  // the network check retries
             ip = 0;
             g_last_round_ns = 0;
             status::EngineRan(armTicksToNs(armGetSystemTick()));
@@ -1194,6 +1209,12 @@ namespace ams {
         bool healthy = false;
         size_t heap_all_peak = 0;
         int batched = 0;  // the driver's batched receive state, as last logged
+        // The driver's UDP socket reopens and the loop's wake pairs remade, as
+        // last logged, and when: while offline it can be every second, so a
+        // line every 10 s at most.
+        unsigned int udp_reopens = 0;
+        uint64_t wake_remakes = 0;
+        u64 last_udp_log = 0, last_wake_log = 0;
         {
             std::scoped_lock lk(g_log_mutex);
             g_log_defer_thread = os::GetCurrentThread();
@@ -1241,6 +1262,16 @@ namespace ams {
                     Log("udp: one datagram per call (batched receive errno %d)", bsd_errno);
                 }
             }
+            if (const unsigned int r = tsnx_driver_udp_reopens(d); r != udp_reopens && now - last_udp_log >= 10'000'000'000ull) {
+                udp_reopens = r;
+                last_udp_log = now;
+                Log("udp: socket reopened on port %u (%u so far)", tsnx_driver_udp_port(d), r);
+            }
+            if (const uint64_t w = rt->WakeRemakes(); w != wake_remakes && now - last_wake_log >= 10'000'000'000ull) {
+                wake_remakes = w;
+                last_wake_log = now;
+                Log("loop: wake sockets remade (%llu so far)", static_cast<unsigned long long>(w));
+            }
             FlushTailnetLog(engine);
             Timed("update check", [&] { StepUpdateCheck(now); });
             if (magicdns && hosts_dirty_since != 0 && now - hosts_dirty_since > 3'000'000'000ull) {
@@ -1255,12 +1286,19 @@ namespace ams {
                 network_checked = false;
                 const u32 cur = network_ip;
                 status::SetOffline(cur == 0);
+                if (cur && g_log_udp_lost) OpenUdpLogSocket();
                 if (cur != ip) {
                     Log("local address changed: %s", cur ? inet_ntoa(in_addr{cur}) : "(offline)");
                     if (cur && !ip) tsnx_engine_network_up(engine, tsnx_driver_now_ns());
                     ip = cur;
                     SetLocalNet(cur);
-                    if (cur) tsnx_driver_refresh_endpoints(d);
+                    // Back from Airplane Mode or on another network, the
+                    // socket may have been dropped with the old one, unnoticed
+                    // so far: a new one, same port (which re-advertises our
+                    // endpoints too). Not when it was opened since we last
+                    // had an address (at start, and after a wake).
+                    if (cur && (udp_fresh || tsnx_driver_reopen_udp(d) != 0)) tsnx_driver_refresh_endpoints(d);
+                    if (cur) udp_fresh = false;
                 }
             }
         }, [&] {

@@ -1,6 +1,7 @@
 #include "runtime.hpp"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -54,6 +55,12 @@ bool MakeWakePair(int *rx, int *tx) {
     fcntl(*tx, F_SETFL, fcntl(*tx, F_GETFL, 0) | O_NONBLOCK);
     return true;
 }
+
+// A socket the system has taken away (Horizon drops them all when the
+// network goes away without a sleep), as opposed to one that is just busy.
+bool SocketGone(int e) { return e == EPIPE || e == EBADF || e == ENOTSOCK || e == ENOTCONN || e == ECONNREFUSED; }
+
+constexpr uint64_t kWakeRemakeEveryNs = 1'000'000'000;
 
 }  // namespace
 
@@ -171,7 +178,7 @@ Runtime::~Runtime() {
 void Runtime::Wake() {
     if (wake_tx_ < 0) return;
     char b = 0;
-    send(wake_tx_, &b, 1, 0);
+    if (send(wake_tx_, &b, 1, 0) < 0 && SocketGone(errno)) wake_gone_.store(true, std::memory_order_relaxed);
 }
 
 void Runtime::AfterCall() {
@@ -233,6 +240,27 @@ bool Runtime::WaitFor(const std::function<bool(TsnxEngine *)> &ready, const Cloc
     }
 }
 
+// With the lock held (Wake() uses the pair under it): replaces a wake pair
+// the system dropped, or one that couldn't be made, once a second at most.
+void Runtime::RepairWake() {
+    const uint64_t now = tsnx_driver_now_ns();
+    if (wake_gone_.exchange(false, std::memory_order_relaxed)) {
+        // Closed now, so that poll() stops returning at once for it.
+        if (wake_rx_ >= 0) close(wake_rx_);
+        if (wake_tx_ >= 0) close(wake_tx_);
+        wake_rx_ = wake_tx_ = -1;
+        wake_remake_at_ns_ = std::max(now, wake_made_ns_ + kWakeRemakeEveryNs);
+    }
+    if (wake_rx_ >= 0 || wake_remake_at_ns_ == 0 || now < wake_remake_at_ns_) return;
+    wake_made_ns_ = now;
+    if (MakeWakePair(&wake_rx_, &wake_tx_)) {
+        wake_remake_at_ns_ = 0;
+        wake_remakes_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        wake_remake_at_ns_ = now + kWakeRemakeEveryNs;  // e.g. still offline
+    }
+}
+
 void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick, const std::function<void()> *after_tick) {
     InternalScope internal;  // this thread only ever does engine work
     pollfd fds[TSNX_DRIVER_MAX_FDS + 1];
@@ -244,9 +272,10 @@ void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick, const std::
         ApplyRequests();
         if (suspend_reasons_ != 0) {
             tsnx_driver_suspend(driver_);
-            close(wake_rx_);
-            close(wake_tx_);
+            if (wake_rx_ >= 0) close(wake_rx_);
+            if (wake_tx_ >= 0) close(wake_tx_);
             wake_rx_ = wake_tx_ = -1;
+            wake_gone_.store(false, std::memory_order_relaxed);  // made anew at resume
             if (on_suspend_) on_suspend_();
             suspended_ = true;
             suspended_flag_ = true;
@@ -263,12 +292,16 @@ void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick, const std::
             // second of latency for new overlay sockets.
             if (on_resume_) on_resume_();
             MakeWakePair(&wake_rx_, &wake_tx_);
+            wake_made_ns_ = tsnx_driver_now_ns();
+            wake_remake_at_ns_ = wake_rx_ < 0 ? wake_made_ns_ + kWakeRemakeEveryNs : 0;
             tsnx_driver_resume(driver_);
             suspended_ = false;
             suspended_flag_ = false;
             cv_.notify_all();
             continue;
         }
+        RepairWake();
+        rounds_.fetch_add(1, std::memory_order_relaxed);
         // Housekeeping at most every kTickEveryNs: under load the loop runs
         // hundreds of rounds a second, and the embedder's tick (status,
         // logs, heap stats) would hold the lock through every one.
@@ -304,9 +337,19 @@ void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick, const std::
         }
         gate_cv_.notify_all();
         polling_ = false;
-        if (wake_rx_ >= 0 && (fds[n].revents & POLLIN)) {
-            char buf[64];
-            while (recv(wake_rx_, buf, sizeof buf, 0) > 0) {
+        if (nfds > n) {
+            // Only this thread closes the pair (under the lock, which
+            // callers need to send on it), so it is still the one polled.
+            if (fds[n].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                wake_gone_.store(true, std::memory_order_relaxed);
+            } else if (fds[n].revents & POLLIN) {
+                char buf[64];
+                for (;;) {
+                    const ssize_t r = recv(wake_rx_, buf, sizeof buf, 0);
+                    if (r > 0) continue;
+                    if (r < 0 && SocketGone(errno)) wake_gone_.store(true, std::memory_order_relaxed);
+                    break;
+                }
             }
         }
         if (rc > 0) tsnx_driver_dispatch(driver_, fds);
