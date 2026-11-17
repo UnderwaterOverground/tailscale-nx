@@ -194,6 +194,8 @@ namespace ams::bsd_mitm {
         constexpr int WireENetUnreach = 101;  // tailnet traffic while the user paused Tailscale
         constexpr int WireNonBlock = 0x800;
         constexpr int WireENoBufs = 105;
+        // Most fds one poll may ask the MITM about (real apps use a handful).
+        constexpr u32 MaxPollFds = 256;
 
         // ---- the real bsd:u ------------------------------------------------
 
@@ -528,6 +530,11 @@ namespace ams::bsd_mitm {
             Result Poll(sf::Out<s32> out_ret, sf::Out<s32> out_errno, u32 nfds, s32 timeout, const sf::InAutoSelectBuffer &fds_in, const sf::OutAutoSelectBuffer &fds_out) {
                 const size_t size = static_cast<size_t>(nfds) * sizeof(pollfd);
                 R_UNLESS(V() != nullptr && nfds > 0 && fds_in.GetSize() >= size && fds_out.GetSize() >= size, sm::mitm::ResultShouldForwardToSession());
+                // Every entry costs ~100 bytes of heap here and in VSock::Poll,
+                // and the app picks how many: past MaxPollFds the console's
+                // own service takes the call (it can't serve tailnet sockets,
+                // but a failed allocation would crash us).
+                R_UNLESS(nfds <= MaxPollFds, sm::mitm::ResultShouldForwardToSession());
                 std::vector<pollfd> fds(nfds);
                 std::memcpy(fds.data(), fds_in.GetPointer(), size);
                 bool any_virtual = false;
