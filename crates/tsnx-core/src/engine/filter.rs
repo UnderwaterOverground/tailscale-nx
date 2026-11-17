@@ -182,18 +182,20 @@ struct Summary {
     tcp_open: bool,
     /// ICMP / ICMPv6 echo request.
     echo_request: bool,
+    /// An IPv4 fragment other than the first (no ports to judge).
+    later_fragment: bool,
 }
 
 fn summarize(pkt: &[u8]) -> Option<Summary> {
-    let (proto, src, dst, l4) = match pkt.first()? >> 4 {
+    let (proto, src, dst, l4, later_fragment) = match pkt.first()? >> 4 {
         4 if pkt.len() >= 20 => {
             let ihl = usize::from(pkt[0] & 0x0f) * 4;
             // Fragments other than the first carry no ports: treat as opaque.
             let frag_offset = u16::from_be_bytes([pkt[6], pkt[7]]) & 0x1fff;
             let l4 = if frag_offset == 0 { pkt.get(ihl..)? } else { &[][..] };
-            (pkt[9], super::packet::src(pkt)?, super::packet::dst(pkt)?, l4)
+            (pkt[9], super::packet::src(pkt)?, super::packet::dst(pkt)?, l4, frag_offset != 0)
         }
-        6 if pkt.len() >= 40 => (pkt[6], super::packet::src(pkt)?, super::packet::dst(pkt)?, &pkt[40..]),
+        6 if pkt.len() >= 40 => (pkt[6], super::packet::src(pkt)?, super::packet::dst(pkt)?, &pkt[40..], false),
         _ => return None,
     };
     let port = |i: usize| l4.get(i..i + 2).map(|b| u16::from_be_bytes([b[0], b[1]])).unwrap_or(0);
@@ -207,7 +209,7 @@ fn summarize(pkt: &[u8]) -> Option<Summary> {
         PROTO_ICMPV6 => l4.first() == Some(&128),
         _ => false,
     };
-    Some(Summary { proto, src, dst, src_port, dst_port, tcp_open, echo_request })
+    Some(Summary { proto, src, dst, src_port, dst_port, tcp_open, echo_request, later_fragment })
 }
 
 #[derive(Default)]
@@ -267,6 +269,12 @@ impl Filter {
     /// own addresses) may be delivered.
     pub fn allows_inbound(&mut self, pkt: &[u8], now: Instant) -> bool {
         let Some(s) = summarize(pkt) else { return false };
+        // A fragment after the first has no ports to judge. As Tailscale's
+        // filter does, let it through: the first is judged, and without it
+        // the rest are never reassembled.
+        if s.later_fragment {
+            return true;
+        }
         match s.proto {
             PROTO_TCP if !s.tcp_open => return true,
             PROTO_UDP => {
@@ -362,6 +370,19 @@ mod tests {
         assert!(!f.allows_inbound(&v4(PROTO_UDP, PEER, ME, 47999, 6000, 0, 0), t), "other remote port");
         let later = Instant::from_millis(200_000);
         assert!(!f.allows_inbound(&v4(PROTO_UDP, PEER, ME, 47998, 6000, 0, 0), later), "flow expired");
+    }
+
+    #[test]
+    fn later_fragments_pass_first_ones_are_judged() {
+        let mut f = Filter::default();
+        let t = Instant::from_millis(0);
+        f.update(Some(&[]), None); // deny everything
+        let mut first = v4(PROTO_UDP, PEER, ME, 47998, 6000, 0, 0);
+        first[6] = 0x20; // more fragments, offset 0: carries the ports
+        assert!(!f.allows_inbound(&first, t), "a first fragment is judged like any packet");
+        let mut later = v4(PROTO_UDP, PEER, ME, 0, 0, 0, 0);
+        later[7] = 0xb9; // offset 185 * 8 = 1480 bytes, no ports
+        assert!(f.allows_inbound(&later, t), "a later fragment has nothing to judge");
     }
 
     #[test]

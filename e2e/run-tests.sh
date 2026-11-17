@@ -78,6 +78,16 @@ mbps=$(echo "$udp" | awk '{for (i=1;i<=NF;i++) if ($i=="Mbits/sec") print $(i-1)
 if awk "BEGIN{exit !(${mbps:-0} >= 47)}"; then pass "UDP 50 Mbit/s stream (got ${mbps} Mbit/s)"; else fail "UDP 50 Mbit/s stream (got ${mbps:-none})"; fi
 tcp=$(preload "iperf3 -c $PEER_IP -t 3 -f m 2>&1 | grep receiver" 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="Mbits/sec") print $(i-1)}')
 if awk "BEGIN{exit !(${tcp:-0} >= 100)}"; then pass "TCP bulk upload (got ${tcp} Mbit/s)"; else fail "TCP bulk upload (got ${tcp:-none})"; fi
+# Datagrams bigger than the tunnel's 1280 MTU: the peer's kernel fragments
+# them, and they must pass the access rules (no ports after the first
+# fragment) and be reassembled (Moonlight video through a subnet route).
+frag=$(preload "iperf3 -c $PEER_IP -u -b 5M -l 3000 -t 3 -R 2>&1 | grep receiver" 2>/dev/null)
+got=$(echo "$frag" | sed -n 's|.* \([0-9]*\)/\([0-9]*\) .*|\1 \2|p')
+if [[ -n $got ]] && awk -v g="$got" 'BEGIN{split(g, a, " "); exit !(a[2] >= 500 && a[1] * 100 <= a[2] * 5)}'; then
+  pass "fragmented UDP reassembled (${got% *} of ${got#* } lost)"
+else
+  fail "fragmented UDP reassembled (got: ${frag:-nothing})"
+fi
 
 # 7. Access rules: the policy (headscale/policy.hujson) allows everything but
 # port 7777, and our node must enforce that for inbound connections.
