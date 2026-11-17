@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Generates crates/tsnx-core/src/tls/roots.rs: a curated subset of the
-webpki-roots trust anchors (Mozilla's set), to keep the Switch build small.
+webpki-roots trust anchors (Mozilla's set), to keep host builds small (the
+Switch uses the console's own root list instead; see native/driver/tsnx_ssl.c).
 
 Covers Tailscale (Let's Encrypt) and the CAs self-hosted control servers
 commonly use. Anything else: configure the server's root with ca_cert=.
 github.com (the update check) chains to Sectigo E46, cross-signed by USERTrust ECC.
 Usage: tools/gen-roots.py <path to webpki-roots/src/lib.rs>
+(the webpki-roots crate's source from crates.io: it isn't a dependency)
 """
 import re, sys
 
