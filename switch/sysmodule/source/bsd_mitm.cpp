@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <vector>
 
 #include "bsd_mitm.hpp"
@@ -682,12 +683,29 @@ namespace ams::bsd_mitm {
 
                 s32 sent = 0;
                 VResult last = VResult::Ok(0);
-                std::vector<u8> payload;
                 for (const auto &m : msgs) {
-                    payload.clear();
-                    for (const auto &[off, len] : m.iovs) payload.insert(payload.end(), data + off, data + off + len);
+                    // One iov (the usual case) is sent from the app's buffer
+                    // as it is; several are joined in a checked allocation.
+                    const u8 *payload = m.iovs.empty() ? data : data + m.iovs[0].first;
+                    size_t len = m.iovs.empty() ? 0 : static_cast<size_t>(m.iovs[0].second);
+                    std::unique_ptr<u8[]> joined;
+                    if (m.iovs.size() > 1) {
+                        len = 0;
+                        for (const auto &iov : m.iovs) len += static_cast<size_t>(iov.second);
+                        joined.reset(new (std::nothrow) u8[len]);
+                        if (!joined) {
+                            last = VResult{-1, WireENoBufs};
+                            break;
+                        }
+                        size_t at = 0;
+                        for (const auto &[off, n] : m.iovs) {
+                            std::memcpy(joined.get() + at, data + off, static_cast<size_t>(n));
+                            at += static_cast<size_t>(n);
+                        }
+                        payload = joined.get();
+                    }
                     const sockaddr *to = dest(m);
-                    last = V()->SendTo(fd, payload.data(), payload.size(), flags, to, to ? m.name_len : 0);
+                    last = V()->SendTo(fd, payload, len, flags, to, to ? m.name_len : 0);
                     if (last.ret < 0) break;
                     const s32 n = static_cast<s32>(last.ret);
                     std::memcpy(data + m.msg_len_off, std::addressof(n), sizeof n);
@@ -702,46 +720,74 @@ namespace ams::bsd_mitm {
                 std::vector<MMsg> msgs;
                 R_UNLESS(ParseMMsgs(data, buf.GetSize(), args.vlen, msgs), sm::mitm::ResultShouldForwardToSession());
 
-                // Receive first (the parse refers to the buffer), then rewrite.
+                // Each datagram goes straight into its message's slots in the
+                // app's own buffer: a copy per message, sized by those slots,
+                // ran the heap out when an app (Punktfunk) passed large ones,
+                // and the failed allocation crashed the sysmodule. The reply
+                // then packs the messages down to what arrived, which only
+                // ever moves bytes towards the start of the buffer.
                 struct Got {
-                    std::vector<u8> bytes;
-                    sockaddr_storage from;
+                    size_t len;
                     socklen_t from_len;
                 };
                 std::vector<Got> got;
+                got.reserve(msgs.size());
                 VResult last = VResult::Ok(0);
                 for (const auto &m : msgs) {
-                    u64 cap = 0;
-                    for (const auto &iov : m.iovs) cap += iov.second;
-                    Got g{std::vector<u8>(cap), {}, static_cast<socklen_t>(std::min<size_t>(m.name_len, sizeof(sockaddr_storage)))};
+                    size_t cap = 0;
+                    for (const auto &iov : m.iovs) cap += static_cast<size_t>(iov.second);
+                    // Several slots need one buffer to receive into first.
+                    u8 *into = m.iovs.empty() ? data : data + m.iovs[0].first;
+                    std::unique_ptr<u8[]> scratch;
+                    if (m.iovs.size() > 1) {
+                        scratch.reset(new (std::nothrow) u8[cap]);
+                        if (!scratch) {
+                            last = VResult{-1, WireENoBufs};
+                            break;
+                        }
+                        into = scratch.get();
+                    }
+                    sockaddr_storage from = {};
+                    socklen_t from_len = static_cast<socklen_t>(std::min<size_t>(m.name_len, sizeof(sockaddr_storage)));
                     // Block (per the socket's mode) for the first message only.
                     const int flags = got.empty() ? args.flags : (args.flags | MSG_DONTWAIT);
-                    last = V()->RecvFrom(args.fd, g.bytes.data(), g.bytes.size(), flags, g.from_len ? reinterpret_cast<sockaddr *>(std::addressof(g.from)) : nullptr,
-                                         g.from_len ? std::addressof(g.from_len) : nullptr);
+                    last = V()->RecvFrom(args.fd, into, cap, flags, from_len ? reinterpret_cast<sockaddr *>(std::addressof(from)) : nullptr,
+                                         from_len ? std::addressof(from_len) : nullptr);
                     if (last.ret < 0) break;
-                    g.bytes.resize(static_cast<size_t>(last.ret));
-                    got.push_back(std::move(g));
+                    const size_t n = static_cast<size_t>(last.ret);
+                    if (scratch) {
+                        size_t done = 0;
+                        for (const auto &[off, len] : m.iovs) {
+                            const size_t part = std::min(static_cast<size_t>(len), n - done);
+                            std::memcpy(data + off, scratch.get() + done, part);
+                            done += part;
+                        }
+                    }
+                    std::memcpy(data + m.name_off, std::addressof(from), from_len);
+                    got.push_back(Got{n, from_len});
                 }
                 if (got.empty()) R_RETURN(Reply(out_ret, out_errno, last));
 
                 size_t off = 1;
                 auto put = [&](const void *p, size_t n) { std::memcpy(data + off, p, n); off += n; };
+                auto move = [&](size_t from, size_t n) { std::memmove(data + off, data + from, n); off += n; };
                 for (size_t i = 0; i < got.size(); i++) {
                     const Got &g = got[i];
+                    const MMsg &m = msgs[i];
                     const u32 name_len = g.from_len;
                     put(std::addressof(name_len), sizeof name_len);
-                    put(std::addressof(g.from), name_len);
-                    const s32 iovlen = static_cast<s32>(msgs[i].iovs.size());
+                    move(m.name_off, name_len);
+                    const s32 iovlen = static_cast<s32>(m.iovs.size());
                     put(std::addressof(iovlen), sizeof iovlen);
                     size_t done = 0;
-                    for (const auto &iov : msgs[i].iovs) {
-                        const u64 n = std::min<u64>(iov.second, g.bytes.size() - done);
+                    for (const auto &[at, len] : m.iovs) {
+                        const u64 n = std::min<u64>(len, g.len - done);
                         put(std::addressof(n), sizeof n);
-                        put(g.bytes.data() + done, static_cast<size_t>(n));
+                        move(at, static_cast<size_t>(n));
                         done += static_cast<size_t>(n);
                     }
                     const u32 controllen = 0;
-                    const s32 msg_flags = 0, msg_len = static_cast<s32>(g.bytes.size());
+                    const s32 msg_flags = 0, msg_len = static_cast<s32>(g.len);
                     put(std::addressof(controllen), sizeof controllen);
                     put(std::addressof(msg_flags), sizeof msg_flags);
                     put(std::addressof(msg_len), sizeof msg_len);

@@ -205,6 +205,79 @@ static int tcp_select(void) {
     return 1;
 }
 
+#ifdef __SWITCH__
+// sendmmsg/recvmmsg, which the MITM serves itself for tailnet sockets. The
+// receive slots are large (as Punktfunk's are; libnx allows 512 KB in all):
+// the MITM once copied each one and ran out of heap. The first slot is
+// split over two iovecs.
+static int udp_mmsg(void) {
+    enum { N = 3, R = 2, SLOT = 240 * 1024, SPLIT = 50 };
+    static const size_t sizes[N] = {100, 700, 1200};
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    CHECK(fd >= 0, "socket");
+    CHECK(connect(fd, (struct sockaddr *)&peer, sizeof peer) == 0, "connect");
+    static char out[N][1200];
+    struct iovec oiov[N];
+    struct mmsghdr omsg[N];
+    memset(omsg, 0, sizeof omsg);
+    for (int i = 0; i < N; i++) {
+        memset(out[i], 'a' + i, sizes[i]);
+        oiov[i].iov_base = out[i];
+        oiov[i].iov_len = sizes[i];
+        omsg[i].msg_hdr.msg_iov = &oiov[i];
+        omsg[i].msg_hdr.msg_iovlen = 1;
+    }
+    char *slots = malloc((size_t)R * SLOT);
+    CHECK(slots != NULL, "malloc");
+    int seen = 0;  // bit per size echoed back intact
+    for (int attempt = 0; attempt < 10 && seen != (1 << N) - 1; attempt++) {
+        CHECK(sendmmsg(fd, omsg, N, 0) == N, "sendmmsg sends all three");
+        while (seen != (1 << N) - 1 && (wait_fd(fd, POLLIN, 1000) & POLLIN)) {
+            struct iovec iiov[R + 1];
+            struct mmsghdr imsg[R];
+            struct sockaddr_in from[R];
+            memset(imsg, 0, sizeof imsg);
+            iiov[0].iov_base = slots;
+            iiov[0].iov_len = SPLIT;
+            iiov[1].iov_base = slots + SPLIT;
+            iiov[1].iov_len = SLOT - SPLIT;
+            imsg[0].msg_hdr.msg_iov = &iiov[0];
+            imsg[0].msg_hdr.msg_iovlen = 2;
+            for (int i = 1; i < R; i++) {
+                iiov[i + 1].iov_base = slots + (size_t)i * SLOT;
+                iiov[i + 1].iov_len = SLOT;
+                imsg[i].msg_hdr.msg_iov = &iiov[i + 1];
+                imsg[i].msg_hdr.msg_iovlen = 1;
+            }
+            for (int i = 0; i < R; i++) {
+                imsg[i].msg_hdr.msg_name = &from[i];
+                imsg[i].msg_hdr.msg_namelen = sizeof from[i];
+            }
+            struct timespec t = {1, 0};
+            const int n = recvmmsg(fd, imsg, R, 0, &t);
+            CHECK(n > 0, "recvmmsg");
+            for (int i = 0; i < n; i++) {
+                const size_t len = imsg[i].msg_len;
+                // Message 0's bytes are split over its two iovecs, which are
+                // contiguous here, so every slot reads as one run.
+                const char *got = slots + (size_t)i * SLOT;
+                int k = -1;
+                for (int j = 0; j < N; j++)
+                    if (sizes[j] == len) k = j;
+                CHECK(k >= 0, "a received length that was sent");
+                for (size_t b = 0; b < len; b++) CHECK(got[b] == 'a' + k, "echo content");
+                CHECK(from[i].sin_addr.s_addr == peer.sin_addr.s_addr && from[i].sin_port == peer.sin_port, "source address");
+                seen |= 1 << k;
+            }
+        }
+    }
+    free(slots);
+    close(fd);
+    CHECK(seen == (1 << N) - 1, "all three echoed back intact");
+    return 1;
+}
+#endif
+
 static int passthrough(const char *target) {
     char host[64];
     int port;
@@ -242,6 +315,9 @@ int main(int argc, char **argv) {
     report("udp unconnected", udp_unconnected());
     report("udp connected", udp_connected());
     report("udp bound to wildcard", udp_bound_any());
+#ifdef __SWITCH__
+    report("udp sendmmsg/recvmmsg, large slots", udp_mmsg());
+#endif
     if (argc > 2) report("pass-through to non-tailnet", passthrough(argv[2]));
     printf(failures ? "%d test(s) failed\n" : "all vsock tests passed\n", failures);
     return failures ? 1 : 0;
