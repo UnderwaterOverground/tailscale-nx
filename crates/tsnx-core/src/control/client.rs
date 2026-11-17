@@ -6,14 +6,13 @@
 use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
 
 use super::conn::ControlConn;
 use super::{hex32, key_request, parse_key_response, CAPABILITY_VERSION};
 use crate::http2::Event as H2Event;
-use crate::stream::SecureStream;
+use crate::stream::{self, SecureStream, TlsConfig};
 use crate::time::{Backoff, Instant};
 
 /// Identifies one outbound TCP connection the driver manages for us.
@@ -23,8 +22,9 @@ pub type ConnId = u32;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Io {
     /// Resolve `host` and connect to it on `port`; report back with
-    /// `on_connected` or `on_closed`.
-    Connect { id: ConnId, host: String, port: u16 },
+    /// `on_connected` or `on_closed`. `tls`: the server name to do TLS with,
+    /// when the driver does it (see [`crate::stream`]).
+    Connect { id: ConnId, host: String, port: u16, tls: Option<String> },
     Send { id: ConnId, data: Vec<u8> },
     Close { id: ConnId },
 }
@@ -110,7 +110,7 @@ pub struct ControlClient {
     cfg: ControlConfig,
     endpoint: Endpoint,
     keys: Keys,
-    tls_config: Option<Arc<rustls::ClientConfig>>,
+    tls_config: Option<TlsConfig>,
     control_key: Option<[u8; 32]>,
     phase: Phase,
     next_id: ConnId,
@@ -160,7 +160,7 @@ impl ControlClient {
     pub fn new(cfg: ControlConfig, keys: Keys, now: Instant) -> Result<Self, String> {
         let endpoint = parse_url(&cfg.url)?;
         let tls_config = if endpoint.tls {
-            Some(crate::tls::client_config(&cfg.extra_roots).map_err(|e| e.to_string())?)
+            Some(stream::tls_config(&cfg.extra_roots)?)
         } else {
             None
         };
@@ -406,7 +406,8 @@ impl ControlClient {
         let id = self.next_id;
         self.next_id += 1;
         self.last_activity = self.now;
-        self.io.push_back(Io::Connect { id, host: self.endpoint.host.clone(), port: self.endpoint.port });
+        let tls = stream::driver_tls_name(self.endpoint.tls, &self.endpoint.host);
+        self.io.push_back(Io::Connect { id, host: self.endpoint.host.clone(), port: self.endpoint.port, tls });
         id
     }
 

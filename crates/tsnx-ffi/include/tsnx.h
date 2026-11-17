@@ -42,6 +42,7 @@ void tsnx_seed_rng(const uint8_t seed[32]);
 void tsnx_set_unix_time(uint64_t unix_secs);
 
 // Standalone TLS 1.3 session; the caller moves bytes between it and a socket.
+// Not on the Switch: it uses the console's ssl service instead (tsnx_ssl.h).
 typedef struct TsnxTls TsnxTls;
 #define TSNX_TLS_ESTABLISHED 1u
 #define TSNX_TLS_PEER_CLOSED 2u
@@ -89,6 +90,9 @@ typedef struct {
     uint32_t id;
     const char *host;
     uint16_t port;
+    // CONNECT: do TLS with this server name, or NULL for plain TCP. Only the
+    // Switch's engine asks this (it has no TLS of its own; see tsnx_ssl.h).
+    const char *tls_name;
     const uint8_t *data;  // valid until the next tsnx_engine_poll_io
     size_t len;
     TsnxAddr addr;        // SEND_UDP destination

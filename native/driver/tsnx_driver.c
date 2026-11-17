@@ -21,6 +21,8 @@
 #include <switch.h>
 #include <switch/services/bsd.h>
 #include <sys/iosupport.h>
+
+#include "tsnx_ssl.h"
 #endif
 
 #ifdef TSNX_NO_STDIO
@@ -48,12 +50,20 @@ static const char *volatile g_step;
 const char *tsnx_driver_step(void) { return g_step; }
 #define RECV_CHUNK 16384
 
+// Conn.connecting
+#define CONNECTING_TCP 1
+#define CONNECTING_TLS 2  // the TLS handshake (Switch)
+
 typedef struct {
     uint32_t id;  // 0 = free slot
     int fd;
     int connecting;
     uint8_t *wbuf;  // bytes accepted from the engine but not yet written
     size_t wlen, wcap;
+    char *tls_name;  // do TLS with this server name
+#ifdef __SWITCH__
+    TsnxSsl *ssl;  // TLS through the console's ssl service
+#endif
 } Conn;
 
 struct TsnxDriver {
@@ -134,7 +144,11 @@ TsnxDriver *tsnx_driver_new(TsnxEngine *engine, tsnx_event_fn on_event, void *ct
 }
 
 static void conn_free(Conn *c) {
+#ifdef __SWITCH__
+    tsnx_ssl_free(c->ssl);
+#endif
     if (c->fd >= 0) close(c->fd);
+    free(c->tls_name);
     free(c->wbuf);
     memset(c, 0, sizeof *c);
     c->fd = -1;
@@ -543,12 +557,15 @@ int tsnx_driver_batched_receive(TsnxDriver *d, int *bsd_errno) {
     return d->mmsg_state;
 }
 
-static void do_connect(TsnxDriver *d, uint32_t id, const char *target, uint16_t port) {
+static void do_connect(TsnxDriver *d, uint32_t id, const char *target, uint16_t port, const char *tls_name) {
     STEP("TCP connect");
     char host[256];
     snprintf(host, sizeof host, "%s", target);
     map_target(d, host, sizeof host, &port);
     Conn *c = conn_find(d, 0);
+#ifndef __SWITCH__
+    if (tls_name) c = NULL;  // only the Switch's engine leaves TLS to us
+#endif
     if (!c) {
         tsnx_engine_closed(d->engine, id, tsnx_driver_now_ns());
         return;
@@ -578,17 +595,109 @@ static void do_connect(TsnxDriver *d, uint32_t id, const char *target, uint16_t 
         tsnx_engine_closed(d->engine, id, tsnx_driver_now_ns());
         return;
     }
+    // Not strdup: it allocates with newlib's own malloc, which in the
+    // sysmodule (Atmosphère's allocator replaces only malloc and friends)
+    // has no heap and returns NULL.
+    char *name = NULL;
+    if (tls_name && (name = malloc(strlen(tls_name) + 1)) != NULL) memcpy(name, tls_name, strlen(tls_name) + 1);
+    if (tls_name && !name) {
+        close(fd);
+        tsnx_engine_closed(d->engine, id, tsnx_driver_now_ns());
+        return;
+    }
     memset(c, 0, sizeof *c);
     c->id = id;
     c->fd = fd;
-    c->connecting = 1;
+    c->connecting = CONNECTING_TCP;
+    c->tls_name = name;
+}
+
+static void pump_engine(TsnxDriver *d);
+
+// The connection is up: the engine can talk. Returns whether the slot is
+// still this connection afterwards.
+static int conn_up(TsnxDriver *d, Conn *c, uint32_t id) {
+    tsnx_engine_connected(d->engine, c->id, tsnx_driver_now_ns());
+    pump_engine(d);
+    return c->id == id;
+}
+
+#ifdef __SWITCH__
+static void driver_log(TsnxDriver *d, const char *text) {
+    TsnxEvent ev = {TSNX_EVENT_LOG, 0, text};
+    if (d->on_event) d->on_event(d->ctx, &ev);
+}
+
+// TCP is up: start TLS, or log why not and close. Returns whether it started.
+static int tls_start(TsnxDriver *d, Conn *c) {
+    STEP("TLS start");
+    uint32_t rc;
+    c->ssl = tsnx_ssl_start(c->fd, c->tls_name, &rc);
+    if (!c->ssl) {
+        char msg[160];
+        snprintf(msg, sizeof msg, "TLS to %s: no session (%04u-%04u)", c->tls_name, 2000 + R_MODULE(rc), R_DESCRIPTION(rc));
+        driver_log(d, msg);
+        conn_closed(d, c);
+        return 0;
+    }
+    c->connecting = CONNECTING_TLS;
+    return 1;
+}
+
+// Advances the handshake. Returns whether it's done; logs and closes if
+// it failed.
+static int tls_handshake(TsnxDriver *d, Conn *c) {
+    STEP("TLS handshake");
+    const int done = tsnx_ssl_handshake(c->ssl);
+    if (done < 0) {
+        char why[64], msg[160];
+        tsnx_ssl_describe(c->ssl, why, sizeof why);
+        snprintf(msg, sizeof msg, "TLS to %s failed: %s", c->tls_name, why);
+        driver_log(d, msg);
+        conn_closed(d, c);
+        return 0;
+    }
+    if (done) c->connecting = 0;
+    return done;
+}
+#endif
+
+// Closes a connection whose last read or write failed; for TLS, logs the
+// ssl service's reason first.
+static void conn_failed(TsnxDriver *d, Conn *c, const char *what) {
+#ifdef __SWITCH__
+    if (c->ssl && errno == EIO) {
+        char why[64], msg[160];
+        tsnx_ssl_describe(c->ssl, why, sizeof why);
+        snprintf(msg, sizeof msg, "TLS to %s: %s failed: %s", c->tls_name, what, why);
+        driver_log(d, msg);
+    }
+#else
+    (void)what;
+#endif
+    conn_closed(d, c);
+}
+
+// recv and send, through TLS when the connection has it.
+static ssize_t conn_recv(Conn *c, void *buf, size_t len) {
+#ifdef __SWITCH__
+    if (c->ssl) return tsnx_ssl_read(c->ssl, buf, len);
+#endif
+    return recv(c->fd, buf, len, 0);
+}
+
+static ssize_t conn_send(Conn *c, const void *buf, size_t len) {
+#ifdef __SWITCH__
+    if (c->ssl) return tsnx_ssl_write(c->ssl, buf, len);
+#endif
+    return send(c->fd, buf, len, 0);
 }
 
 // Writes as much buffered data as the socket takes. Returns -1 on error.
 static int conn_flush(Conn *c) {
     STEP("TCP send");
     while (c->wlen > 0) {
-        ssize_t n = send(c->fd, c->wbuf, c->wlen, 0);
+        ssize_t n = conn_send(c, c->wbuf, c->wlen);
         if (n == 0) return 0;  // nothing taken: try when it's writable again
         if (n < 0) return (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) ? 0 : -1;
         memmove(c->wbuf, c->wbuf + n, c->wlen - (size_t)n);
@@ -625,12 +734,15 @@ static void pump_engine(TsnxDriver *d) {
         Conn *c;
         switch (io.kind) {
             case TSNX_IO_CONNECT:
-                do_connect(d, io.id, io.host, io.port);
+                do_connect(d, io.id, io.host, io.port, io.tls_name);
                 break;
             case TSNX_IO_SEND:
                 c = conn_find(d, io.id);
-                if (c && (conn_queue(c, io.data, io.len) != 0 || (!c->connecting && conn_flush(c) != 0)))
+                if (c && conn_queue(c, io.data, io.len) != 0) {
                     conn_closed(d, c);
+                } else if (c && !c->connecting && conn_flush(c) != 0) {
+                    conn_failed(d, c, "write");
+                }
                 break;
             case TSNX_IO_CLOSE:
                 c = conn_find(d, io.id);
@@ -716,7 +828,10 @@ static void pump_taildrop(TsnxDriver *d) {
 
 void tsnx_driver_pump(TsnxDriver *d) { pump_engine(d); }
 
-static short conn_events(const Conn *c) { return POLLIN | (c->connecting || c->wlen > 0 ? POLLOUT : 0); }
+// During the TLS handshake the service only waits for the server.
+static short conn_events(const Conn *c) {
+    return POLLIN | (c->connecting == CONNECTING_TCP || (!c->connecting && c->wlen > 0) ? POLLOUT : 0);
+}
 
 int tsnx_driver_prepare(TsnxDriver *d, struct pollfd *fds, int cap, int max_wait_ms, int *wait_ms) {
     uint64_t now = tsnx_driver_now_ns();
@@ -800,7 +915,7 @@ void tsnx_driver_dispatch(TsnxDriver *d, const struct pollfd *fds) {
         uint32_t id = d->poll_ids[i];
         short re = fds[i].revents;
         if (!re || c->id != id) continue;
-        if (c->connecting && (re & (POLLOUT | POLLERR | POLLHUP))) {
+        if (c->connecting == CONNECTING_TCP && (re & (POLLOUT | POLLERR | POLLHUP))) {
             int err = 0;
             socklen_t len = sizeof err;
             getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &err, &len);
@@ -809,21 +924,36 @@ void tsnx_driver_dispatch(TsnxDriver *d, const struct pollfd *fds) {
                 continue;
             }
             c->connecting = 0;
-            tsnx_engine_connected(d->engine, c->id, tsnx_driver_now_ns());
-            pump_engine(d);
-            if (c->id != id) continue;
+#ifdef __SWITCH__
+            if (c->tls_name) {
+                if (!tls_start(d, c)) continue;
+                re = POLLIN;  // send the hello now
+            }
+#endif
+            if (!c->connecting && !conn_up(d, c, id)) continue;
         }
+#ifdef __SWITCH__
+        if (c->connecting == CONNECTING_TLS) {
+            if (!(re & (POLLIN | POLLERR | POLLHUP)) || !tls_handshake(d, c)) continue;
+            if (!conn_up(d, c, id)) continue;
+            re = POLLIN;  // whatever came with the handshake's end
+        }
+#endif
         if (re & POLLIN) {
             for (;;) {
                 STEP("TCP receive");
-                ssize_t got = recv(c->fd, d->rbuf, sizeof d->rbuf, 0);
+                ssize_t got = conn_recv(c, d->rbuf, sizeof d->rbuf);
                 if (got > 0) {
                     tsnx_engine_data(d->engine, c->id, d->rbuf, (size_t)got, tsnx_driver_now_ns());
                     pump_engine(d);
                     if (c->id != id) break;
                     continue;
                 }
-                if (got == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) conn_closed(d, c);
+                if (got == 0) {
+                    conn_closed(d, c);
+                } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                    conn_failed(d, c, "read");
+                }
                 break;
             }
             if (c->id != id) continue;
@@ -831,7 +961,7 @@ void tsnx_driver_dispatch(TsnxDriver *d, const struct pollfd *fds) {
             conn_closed(d, c);
             continue;
         }
-        if (!c->connecting && c->wlen > 0 && conn_flush(c) != 0) conn_closed(d, c);
+        if (!c->connecting && c->wlen > 0 && conn_flush(c) != 0) conn_failed(d, c, "write");
     }
     pump_engine(d);
     retire_broken_udp(d);

@@ -697,7 +697,8 @@ impl Engine {
         let Some((&region, node)) = self.derp_nodes.iter().find(|(r, _)| last.is_none_or(|l| **r > l)) else { return false };
         let (host, port) = (node.connect_host.clone(), node.port);
         let id = self.alloc_conn(super::Owner::Probe(region));
-        self.io.push_back(Io::Connect { id, host, port });
+        // Timing the TCP connect alone: no TLS.
+        self.io.push_back(Io::Connect { id, host, port, tls: None });
         if let Some(p) = self.magic.tcp_probe.as_mut() {
             p.last = Some(region);
             p.current = Some((id, region, self.now));

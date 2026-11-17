@@ -15,12 +15,7 @@ switch-limits = []
 chacha20poly1305.workspace = true
 x25519-dalek.workspace = true
 blake2.workspace = true
-rustls.workspace = true
-sha2.workspace = true
 hmac.workspace = true
-p256.workspace = true
-p384.workspace = true
-rsa.workspace = true
 rand_core.workspace = true
 rand_chacha.workspace = true
 spin.workspace = true
@@ -37,6 +32,15 @@ ts_util = { path = "../../third_party/tailscale-rs/ts_util", default-features = 
 ts_tunnel = { path = "../../third_party/tailscale-rs/ts_tunnel", default-features = false }
 ts_disco_protocol = { path = "../../third_party/tailscale-rs/ts_disco_protocol", default-features = false, features = ["alloc"] }
 ts_packet = { path = "../../third_party/tailscale-rs/ts_packet", default-features = false }
+
+# TLS. On the Switch the C driver does it through the console's ssl service
+# instead (src/stream.rs), which saves about 224 KB.
+[target.'cfg(not(target_os = "horizon"))'.dependencies]
+rustls.workspace = true
+sha2.workspace = true
+p256.workspace = true
+p384.workspace = true
+rsa.workspace = true
 
 [dev-dependencies]
 hex-literal.workspace = true

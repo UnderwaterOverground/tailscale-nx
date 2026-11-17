@@ -32,6 +32,7 @@ pub mod selftest;
 pub mod stream;
 pub mod stun;
 pub mod time;
+#[cfg(not(target_os = "horizon"))]
 pub mod tls;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

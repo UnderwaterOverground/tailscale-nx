@@ -22,6 +22,7 @@
 #include "tsnx.h"
 #include "tsnx_app.h"
 #include "tsnx_driver.h"
+#include "tsnx_ssl.h"
 
 #define CONFIG_DIR "sdmc:/config/tailscale-nx"
 #define CONFIG_PATH CONFIG_DIR "/config.ini"
@@ -229,6 +230,7 @@ int main(int argc, char **argv) {
         uint64_t now_unix = console_unix_time();
         bool corrected = false;
         uint64_t unix_time = tsnx_sane_unix_time(now_unix, cfg.control_url, &corrected);
+        const bool clock_right = unix_time != 0 && !corrected;
         if (corrected) {
             printf("\x1b[33mConsole clock looks wrong (%s); using the server's time (%s).\n"
                    "Fix it with the QuickNTP overlay to avoid this.\x1b[0m\n",
@@ -239,6 +241,11 @@ int main(int argc, char **argv) {
                    fmt_date(now_unix));
             unix_time = now_unix;
         }
+        // The driver does TLS through the console's ssl service. It checks
+        // certificate dates by the console's clock, so only when that's right.
+        uint32_t ssl_rc = tsnx_ssl_init(clock_right);
+        if (ssl_rc) printf("ssl service: 0x%x\n", ssl_rc);
+        if (ca && (ssl_rc = tsnx_ssl_add_root(ca, ca_len)) != 0) printf("ca_cert not accepted: 0x%x\n", ssl_rc);
         engine = g_engine = tsnx_engine_new(&ecfg, tsnx_driver_now_ns(), unix_time);
         if (engine) driver = tsnx_driver_new(engine, on_event, &peers);
         if (!driver) printf("engine init failed\n");
@@ -283,6 +290,7 @@ int main(int argc, char **argv) {
 
     tsnx_driver_free(driver);
     tsnx_engine_free(engine);
+    tsnx_ssl_exit();
     socketExit();
     consoleExit(NULL);
     return 0;

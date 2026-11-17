@@ -15,6 +15,11 @@
 
 #include "tsnx.h"
 #include "tsnx_dns.h"
+#ifdef __SWITCH__
+#include <switch/result.h>
+
+#include "tsnx_ssl.h"
+#endif
 
 #ifdef TSNX_NO_STDIO
 // Builds without newlib's printf (the sysmodule) supply this instead.
@@ -26,15 +31,22 @@ int tsnx_snprintf(char *dst, size_t size, const char *fmt, ...);
 
 struct TsnxUpdate {
     int fd;
+#ifdef __SWITCH__
+    TsnxSsl *ssl;  // the console's ssl service does TLS
+    int established;
+    char req[256];  // sent once the handshake is done
+    size_t req_off, req_len;
+#else
     TsnxTls *tls;
+    uint8_t out[1024];  // ciphertext taken from TLS, not yet sent
+    size_t out_off, out_len;
+#endif
     int connecting;
     int result;
     uint64_t deadline_ns;
     char current[24];
     char latest[24];
     char error[96];
-    uint8_t out[1024];  // ciphertext taken from TLS, not yet sent
-    size_t out_off, out_len;
     char head[1024];    // the response's start; the Location header is early
     size_t head_len;
 };
@@ -84,11 +96,6 @@ TsnxUpdate *tsnx_update_start(const char *repo, const char *current, uint64_t no
     }
     u->connecting = 1;
 
-    u->tls = tsnx_tls_new(HOST);
-    if (!u->tls) {
-        fail(u, "TLS setup failed", NULL);
-        return u;
-    }
     // Sent once the handshake is done.
     char req[256];
     const int n = snprintf(req, sizeof req,
@@ -97,9 +104,21 @@ TsnxUpdate *tsnx_update_start(const char *repo, const char *current, uint64_t no
                            "User-Agent: tailscale-nx/%s\r\n"
                            "Connection: close\r\n\r\n",
                            repo, current);
-    if (n <= 0 || (size_t)n >= sizeof req || tsnx_tls_write(u->tls, (const uint8_t *)req, (size_t)n) != 0) {
-        fail(u, "TLS write failed", NULL);
+    if (n <= 0 || (size_t)n >= sizeof req) {
+        fail(u, "request too long", NULL);
+        return u;
     }
+#ifdef __SWITCH__
+    memcpy(u->req, req, (size_t)n);
+    u->req_len = (size_t)n;
+#else
+    u->tls = tsnx_tls_new(HOST);
+    if (!u->tls) {
+        fail(u, "TLS setup failed", NULL);
+        return u;
+    }
+    if (tsnx_tls_write(u->tls, (const uint8_t *)req, (size_t)n) != 0) fail(u, "TLS write failed", NULL);
+#endif
     return u;
 }
 
@@ -139,6 +158,51 @@ static int parse_head(TsnxUpdate *u) {
     return u->result;
 }
 
+#ifdef __SWITCH__
+static int fail_ssl(TsnxUpdate *u) {
+    char why[64];
+    tsnx_ssl_describe(u->ssl, why, sizeof why);
+    return fail(u, "TLS", why);
+}
+
+// Handshake, request, then the response's head, as far as each gets
+// without waiting.
+static int step_tls(TsnxUpdate *u) {
+    if (!u->ssl) {
+        uint32_t rc;
+        u->ssl = tsnx_ssl_start(u->fd, HOST, &rc);
+        if (!u->ssl) {
+            char detail[24];
+            snprintf(detail, sizeof detail, "%04u-%04u", 2000 + R_MODULE(rc), R_DESCRIPTION(rc));
+            return fail(u, "TLS setup failed", detail);
+        }
+    }
+    if (!u->established) {
+        const int done = tsnx_ssl_handshake(u->ssl);
+        if (done < 0) return fail_ssl(u);
+        if (!done) return TSNX_UPDATE_PENDING;
+        u->established = 1;
+    }
+    while (u->req_off < u->req_len) {
+        const ssize_t n = tsnx_ssl_write(u->ssl, u->req + u->req_off, u->req_len - u->req_off);
+        if (n < 0 && errno == EAGAIN) return TSNX_UPDATE_PENDING;
+        if (n <= 0) return fail_ssl(u);
+        u->req_off += (size_t)n;
+    }
+    for (;;) {
+        const size_t room = sizeof u->head - 1 - u->head_len;
+        if (room == 0) return parse_head(u);
+        const ssize_t got = tsnx_ssl_read(u->ssl, u->head + u->head_len, room);
+        if (got < 0 && errno == EAGAIN) return TSNX_UPDATE_PENDING;
+        if (got < 0) return u->head_len ? parse_head(u) : fail_ssl(u);  // a close can read as a failure
+        if (got == 0) return u->head_len ? parse_head(u) : fail(u, "connection closed", NULL);
+        u->head_len += (size_t)got;
+        u->head[u->head_len] = 0;
+        if (strstr(u->head, "\r\n\r\n")) return parse_head(u);
+    }
+}
+#endif
+
 int tsnx_update_step(TsnxUpdate *u, uint64_t now_ns) {
     if (u->result != TSNX_UPDATE_PENDING) return u->result;
     if (now_ns > u->deadline_ns) return fail(u, "timed out", NULL);
@@ -153,6 +217,9 @@ int tsnx_update_step(TsnxUpdate *u, uint64_t now_ns) {
         u->connecting = 0;
     }
 
+#ifdef __SWITCH__
+    return step_tls(u);
+#else
     for (int progressed = 1; progressed;) {
         progressed = 0;
         // Send what TLS has for the server.
@@ -187,6 +254,7 @@ int tsnx_update_step(TsnxUpdate *u, uint64_t now_ns) {
         }
     }
     return TSNX_UPDATE_PENDING;
+#endif
 }
 
 const char *tsnx_update_latest(const TsnxUpdate *u) { return u->latest; }
@@ -195,8 +263,12 @@ const char *tsnx_update_error(const TsnxUpdate *u) { return u->error; }
 
 void tsnx_update_free(TsnxUpdate *u) {
     if (!u) return;
-    if (u->fd >= 0) close(u->fd);
+#ifdef __SWITCH__
+    tsnx_ssl_free(u->ssl);  // before the socket: the service holds a duplicate
+#else
     if (u->tls) tsnx_tls_free(u->tls);
+#endif
+    if (u->fd >= 0) close(u->fd);
     free(u);
 }
 

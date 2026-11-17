@@ -71,7 +71,7 @@ impl Sockets {
     /// Performs one I/O request from the core. Returns events to deliver.
     pub fn apply(&mut self, io: Io) -> Vec<SockEvent> {
         match io {
-            Io::Connect { id, host, port } => {
+            Io::Connect { id, host, port, .. } => {
                 let result = resolve(&host, port)
                     .and_then(|addr| TcpStream::connect_timeout(&addr, Duration::from_secs(10)))
                     .and_then(|s| {

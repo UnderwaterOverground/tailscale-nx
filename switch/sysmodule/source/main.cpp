@@ -42,6 +42,7 @@ extern "C" {
 #include "tsnx_app.h"
 #include "tsnx_dns.h"
 #include "tsnx_driver.h"
+#include "tsnx_ssl.h"
 #include "tsnx_update.h"
 }
 
@@ -1097,7 +1098,17 @@ namespace ams {
         u64 unix_time = tsnx_sane_unix_time(console_time, cfg.control_url, &corrected);
         if (corrected) Log("console clock implausible (%llu); using the control server's time (%llu)",
                            static_cast<unsigned long long>(console_time), static_cast<unsigned long long>(unix_time));
+        const bool clock_right = unix_time != 0 && !corrected;
         if (unix_time == 0) unix_time = console_time;
+        // The console's ssl service does our TLS (control, DERP, the update
+        // check). It checks certificate dates by the console's clock, so
+        // only when that's right.
+        if (const u32 rc = tsnx_ssl_init(clock_right); rc != 0) {
+            Log("ssl service: 0x%x", rc);
+        }
+        if (ca_len > 0) {
+            if (const u32 rc = tsnx_ssl_add_root(ca.get(), static_cast<size_t>(ca_len)); rc != 0) Log("ca_cert not accepted: 0x%x", rc);
+        }
 
         TsnxConfig ecfg = {};
         ecfg.control_url = cfg.control_url;

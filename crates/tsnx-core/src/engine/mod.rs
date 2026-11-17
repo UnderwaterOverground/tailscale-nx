@@ -15,7 +15,6 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::net::{IpAddr, SocketAddr};
 use core::time::Duration;
@@ -28,7 +27,7 @@ use zerocopy::IntoBytes;
 use crate::control::client::{ConnId, ControlClient, ControlConfig, Io as ControlIo, Keys, Update};
 use crate::derp::{DerpClient, DerpEvent};
 use crate::netstack::{Netstack, MTU};
-use crate::stream::SecureStream;
+use crate::stream::{self, SecureStream, TlsConfig};
 use crate::time::{Backoff, Instant};
 use packet::Prefix;
 
@@ -36,8 +35,10 @@ use packet::Prefix;
 /// lifetime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Io {
-    /// Resolve `host` (or parse it as an IP literal) and connect TCP.
-    Connect { id: ConnId, host: String, port: u16 },
+    /// Resolve `host` (or parse it as an IP literal) and connect TCP. With
+    /// `tls`, the driver does TLS with that server name too (on the Switch,
+    /// see [`crate::stream`]) and data is plaintext both ways.
+    Connect { id: ConnId, host: String, port: u16, tls: Option<String> },
     Send { id: ConnId, data: Vec<u8> },
     Close { id: ConnId },
     /// Send a datagram from the engine's UDP socket (WireGuard, disco, STUN).
@@ -152,7 +153,7 @@ pub struct Engine {
     owners: BTreeMap<ConnId, Owner>,
     control_ids: BTreeMap<ConnId, ConnId>,
     next_conn: ConnId,
-    tls: Arc<rustls::ClientConfig>,
+    tls: TlsConfig,
     io: VecDeque<Io>,
     events: VecDeque<Event>,
     /// Whether the last [`Event::Control`] said up.
@@ -186,9 +187,10 @@ const TRIM_INTERVAL: Duration = Duration::from_secs(15);
 
 impl Engine {
     pub fn new(cfg: EngineConfig, now: Instant, unix_time: Duration) -> Result<Self, String> {
+        #[cfg(not(target_os = "horizon"))]
         crate::tls::CLOCK.set(unix_time.as_secs());
         let node_private = NodePrivateKey::from_bytes(cfg.node_private);
-        let tls = crate::tls::client_config(&cfg.control.extra_roots).map_err(|e| e.to_string())?;
+        let tls = stream::tls_config(&cfg.control.extra_roots)?;
         let disco_private = cfg.disco_private;
         let keys = Keys {
             machine_private: cfg.machine_private,
@@ -552,10 +554,10 @@ impl Engine {
         // Control session.
         while let Some(io) = self.control.poll_io() {
             match io {
-                ControlIo::Connect { id, host, port } => {
+                ControlIo::Connect { id, host, port, tls } => {
                     let g = self.alloc_conn(Owner::Control(id));
                     self.control_ids.insert(id, g);
-                    self.io.push_back(Io::Connect { id: g, host, port });
+                    self.io.push_back(Io::Connect { id: g, host, port, tls });
                 }
                 ControlIo::Send { id, data } => {
                     if let Some(&g) = self.control_ids.get(&id) {
@@ -958,7 +960,8 @@ impl Engine {
     fn open_derp(&mut self, region: u32) {
         let Some(node) = self.derp_nodes.get(&region).cloned() else { return };
         let id = self.alloc_conn(Owner::Derp(region));
-        self.io.push_back(Io::Connect { id, host: node.connect_host.clone(), port: node.port });
+        let tls = stream::driver_tls_name(true, &node.hostname);
+        self.io.push_back(Io::Connect { id, host: node.connect_host.clone(), port: node.port, tls });
         let now = self.now;
         let conn = Box::new(DerpConn { id, node, client: None, queue: VecDeque::new(), last_rx: now, last_used: now });
         self.derps.insert(region, conn);

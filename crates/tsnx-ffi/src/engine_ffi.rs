@@ -40,6 +40,9 @@ pub struct TsnxIo {
     /// NUL-terminated host name or IP literal (CONNECT).
     pub host: *const c_char,
     pub port: u16,
+    /// CONNECT: the server name to do TLS with, or NULL for plain TCP. Only
+    /// the Switch's engine asks this of the driver.
+    pub tls_name: *const c_char,
     /// Bytes to send (SEND, SEND_UDP). Valid until the next `tsnx_engine_poll_io`.
     pub data: *const u8,
     pub len: usize,
@@ -163,18 +166,28 @@ pub unsafe extern "C" fn tsnx_engine_poll_io(e: *mut TsnxEngine, out: *mut TsnxI
         id: 0,
         host: c"".as_ptr(),
         port: 0,
+        tls_name: core::ptr::null(),
         data: core::ptr::null(),
         len: 0,
         addr: TsnxAddr { family: 0, ip: [0; 16], port: 0 },
     };
     match io {
-        Io::Connect { id, host, port } => {
+        Io::Connect { id, host, port, tls } => {
+            // Both names in one buffer: "host\0tls\0".
             e.io_host = host.into_bytes();
             e.io_host.push(0);
+            let tls_at = e.io_host.len();
+            if let Some(name) = &tls {
+                e.io_host.extend_from_slice(name.as_bytes());
+                e.io_host.push(0);
+            }
             out.kind = TSNX_IO_CONNECT;
             out.id = id;
             out.host = e.io_host.as_ptr().cast();
             out.port = port;
+            if tls.is_some() {
+                out.tls_name = e.io_host[tls_at..].as_ptr().cast();
+            }
         }
         Io::Send { id, data } => {
             e.io_data = data;

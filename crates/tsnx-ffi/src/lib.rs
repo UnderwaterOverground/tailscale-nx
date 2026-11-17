@@ -48,14 +48,19 @@ pub unsafe extern "C" fn tsnx_seed_rng(seed: *const u8) {
 /// Sets wall-clock time (seconds since the Unix epoch) for certificate checks.
 #[no_mangle]
 pub extern "C" fn tsnx_set_unix_time(unix_secs: u64) {
+    #[cfg(not(target_os = "horizon"))]
     tsnx_core::tls::CLOCK.set(unix_secs);
+    #[cfg(target_os = "horizon")]
+    let _ = unix_secs;  // the console's ssl service has its own clock
 }
 
 mod engine_ffi;
 mod logging;
+#[cfg(not(target_os = "horizon"))]
 mod tls_ffi;
 pub use engine_ffi::*;
 pub use logging::*;
+#[cfg(not(target_os = "horizon"))]
 pub use tls_ffi::*;
 
 /// Rust heap accounting shared by the Horizon and host allocators: live
