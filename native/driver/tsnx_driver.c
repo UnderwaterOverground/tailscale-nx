@@ -44,6 +44,9 @@ int tsnx_snprintf(char *dst, size_t size, const char *fmt, ...);
 
 // A dropped UDP socket is reopened at most this often.
 #define REOPEN_EVERY_NS 1000000000ull
+// Rounds in a row poll() may report the UDP socket ready with nothing to
+// read before it is taken as dropped (see empty_ready).
+#define UDP_EMPTY_READY_LIMIT 64
 
 static const char *volatile g_step;
 #define STEP(s) (g_step = (s))
@@ -110,6 +113,11 @@ struct TsnxDriver {
     // caller's lock: hence atomic); the next dispatch closes the socket, and
     // tsnx_driver_prepare reopens it at most once a second.
     int broken;
+    // Rounds in a row poll() reported the UDP socket ready but nothing could
+    // be read. A dropped socket can do this without any error saying so
+    // (zerotier-nx saw ~6 s of it in Airplane Mode, back-to-back rounds,
+    // until a send failed with EPIPE), so enough in a row count as broken.
+    int empty_ready;
     uint64_t reopen_at_ns;    // when to open another (0: none due)
     uint64_t last_reopen_ns;  // when one was last tried
     unsigned int reopens;     // how many were opened
@@ -302,6 +310,7 @@ static void close_udp(TsnxDriver *d) {
     d->n_staged = 0;
     d->staged_all = 0;
     d->prefetched = 0;
+    d->empty_ready = 0;
     __atomic_store_n(&d->broken, 0, __ATOMIC_RELAXED);
 }
 
@@ -540,7 +549,7 @@ void tsnx_driver_prefetch(TsnxDriver *d, const struct pollfd *fds) {
 // app reading what we deliver would wait out every read. A video frame
 // arrives as a burst of datagrams, and delivered all at once it overflows
 // the app's socket queue; the rest is read by the next round's prefetch.
-static void udp_receive(TsnxDriver *d) {
+static int udp_receive(TsnxDriver *d) {
     int handled = 0;
     const int prefetched = d->prefetched;
     d->prefetched = 0;
@@ -551,7 +560,7 @@ static void udp_receive(TsnxDriver *d) {
         const int drained = d->staged_all;
         d->n_staged = 0;
         d->staged_all = 0;
-        if (drained || prefetched || handled >= UDP_RECV_BATCH) return;
+        if (drained || prefetched || handled >= UDP_RECV_BATCH) return handled;
         STEP("UDP receive");
         d->n_staged = stage(d);
         d->staged_all = d->n_staged < UDP_STAGED;
@@ -923,9 +932,17 @@ static void retire_broken_udp(TsnxDriver *d) {
 
 void tsnx_driver_dispatch(TsnxDriver *d, const struct pollfd *fds) {
     if (d->poll_udp >= 0 && !d->prefetched && udp_poll_gone(d, fds[d->poll_udp].revents)) mark_broken(d);
-    if (d->poll_udp >= 0 && !is_broken(d) && (fds[d->poll_udp].revents & POLLIN)) {
-        udp_receive(d);
-        pump_engine(d);
+    if (d->poll_udp >= 0) {
+        const short rev = fds[d->poll_udp].revents;
+        int got = 0;
+        if (!is_broken(d) && (rev & POLLIN)) {
+            got = udp_receive(d);
+            pump_engine(d);
+        }
+        if (got > 0 || !rev)
+            d->empty_ready = 0;
+        else if (!is_broken(d) && ++d->empty_ready >= UDP_EMPTY_READY_LIMIT)
+            mark_broken(d);  // reopening a socket that was fine costs little
     }
     for (int i = 0; i < d->poll_conns; i++) {
         Conn *c = d->poll_owners[i];

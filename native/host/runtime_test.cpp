@@ -124,6 +124,27 @@ int main() {
         assert(rt->Rounds() - rounds < 100);
         std::printf("ok: a dropped UDP socket is reopened on the same port (again after %lld ms), %llu rounds meanwhile\n",
                     static_cast<long long>(ms), static_cast<unsigned long long>(rt->Rounds() - rounds));
+        // Ready round after round with nothing to read and no error (Airplane
+        // Mode did this for ~6 s on the console): a UDP socket shut for
+        // reading stands in, always readable and every read empty.
+        fd = FindUdpOnPort(port);
+        rounds = rt->Rounds();
+        {
+            const int empty = socket(AF_INET, SOCK_DGRAM, 0);
+            sockaddr_in to{};
+            to.sin_family = AF_INET;
+            to.sin_port = htons(9);
+            to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            assert(empty >= 0 && connect(empty, reinterpret_cast<sockaddr *>(&to), sizeof to) == 0 && shutdown(empty, SHUT_RD) == 0);
+            assert(dup2(empty, fd) == fd);
+            close(empty);
+        }
+        assert(Eventually([&] { return reopens() == 3; }, std::chrono::milliseconds(3000)));
+        assert(udp_port() == port && FindUdpOnPort(port) >= 0);
+        const uint64_t empty_rounds = rt->Rounds() - rounds;
+        assert(empty_rounds < 300);  // 64 to notice, then an idle wait for the reopen
+        std::printf("ok: a socket that is always ready with nothing to read is reopened, %llu rounds meanwhile\n",
+                    static_cast<unsigned long long>(empty_rounds));
     }
 
     // ---- the system drops the wake pair ------------------------------------
