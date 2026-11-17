@@ -37,6 +37,7 @@ static ALLOC: heap::Counting = heap::Counting;
 mod driver;
 mod echo;
 mod net;
+mod timing;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -245,6 +246,14 @@ fn up(args: &[String]) -> Result<(), String> {
     };
     let bulk = flag(args, "--bulk").map(|n| n.parse().expect("--bulk bytes")).unwrap_or(0);
     let mut echo = flag(args, "--echo-test").map(|ip| echo::EchoTest::new(ip.parse().expect("--echo-test IP"), bulk));
+    let mut timing = flag(args, "--connect-timing").map(|t| {
+        let idles = flag(args, "--idles")
+            .unwrap_or("0")
+            .split(',')
+            .map(|s| std::time::Duration::from_secs(s.parse().expect("--idles seconds,...")))
+            .collect();
+        timing::ConnectTiming::new(t.parse().expect("--connect-timing IP:port"), idles)
+    });
     let ready = std::cell::Cell::new(false);
     let key_changed = std::cell::Cell::new(false);
     let direct = std::cell::Cell::new(false);
@@ -272,6 +281,9 @@ fn up(args: &[String]) -> Result<(), String> {
                     log::error!("{e}");
                 }
             }
+            if let Some(t) = timing.as_mut() {
+                return !ready.get() || t.step(engine, clock);
+            }
             match echo.as_mut() {
             Some(t) if ready.get() => {
                 if t.step(engine, clock) {
@@ -294,6 +306,11 @@ fn up(args: &[String]) -> Result<(), String> {
     }
     if let Some(t) = echo {
         return t.result();
+    }
+    if let Some(t) = timing {
+        for line in t.summary() {
+            println!("timing: {line}");
+        }
     }
     result
 }
