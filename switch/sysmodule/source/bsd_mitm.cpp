@@ -596,8 +596,9 @@ namespace ams::bsd_mitm {
                 if (tailnet) {
                     char dst[64];
                     FormatAddr(sa, dst, sizeof dst);
+                    // A non-blocking connect reports in-progress (115), not failure.
                     Log("bsd mitm: pid %lu fd %d connect to %s over the tailnet: %s (errno %d)", m_client_info.process_id.value, fd, dst,
-                        r.ret >= 0 ? "ok" : "failed", r.ret < 0 ? r.err : 0);
+                        r.ret >= 0 ? "ok" : r.err == 115 ? "in progress" : "failed", r.ret < 0 ? r.err : 0);
                 }
                 R_RETURN(Reply(out_ret, out_errno, r));
             }
