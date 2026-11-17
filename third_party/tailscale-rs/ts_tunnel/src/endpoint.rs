@@ -493,6 +493,13 @@ impl Endpoint {
         peer.respond_to_handshake(&mut self.state, handshake, now, out)
     }
 
+    /// tsnx: whether `receiver_id` (from a transport packet's header) names one of our sessions.
+    /// A packet that [`Endpoint::recv`] drops for a known session was a duplicate or stale;
+    /// for an unknown one, the peer holds a session we don't have.
+    pub fn has_session(&self, receiver_id: u32) -> bool {
+        self.state.ids.get_by_session_id(&receiver_id.into()).is_some()
+    }
+
     /// Dispatch time-based events that are due to occur at or before the given instant.
     ///
     /// Use [`Endpoint::next_event`] to know when to call dispatch_events. It is inefficient but
@@ -956,6 +963,39 @@ mod tests {
         p.recv_at_a(t.at(6));
         p.assert_received_at_a([packet(4)]);
         assert_no_packets(&p.a_to_b);
+    }
+
+    // tsnx: a duplicate of a delivered packet is dropped like a packet for an unknown session;
+    // has_session tells the two apart.
+    #[test]
+    fn test_has_session_tells_duplicates_from_unknown_sessions() {
+        let mut p = EndpointPair::new();
+        let t = TestClock::new();
+        p.send_from_a(t.at(0), [packet(1)]);
+        p.recv_at_b(t.at(1));
+        p.recv_at_a(t.at(2));
+        p.recv_at_b(t.at(3));
+        p.assert_received_at_b([packet(1)]);
+
+        p.send_from_a(t.at(4), [packet(2)]);
+        let wire = p.a_to_b[0].as_ref().to_vec();
+        let receiver = u32::from_le_bytes([wire[4], wire[5], wire[6], wire[7]]);
+        p.recv_at_b(t.at(4));
+        p.assert_received_at_b([packet(2)]);
+
+        // The same packet again (sent over DERP and UDP): dropped, but the session is ours.
+        p.a_to_b.push(PacketMut::from(wire.clone()));
+        p.recv_at_b(t.at(4));
+        assert_no_packets(&p.received_at_b);
+        assert_no_packets(&p.b_to_a);
+        assert!(p.b.has_session(receiver));
+
+        // B loses its state (as after a restart): now the session is unknown.
+        let key_a = p.b.peer_key(PeerId(1)).unwrap();
+        assert!(p.b.remove_peer(PeerId(1)));
+        p.b.upsert_peer(PeerConfig::new(PeerId(1), key_a, [0; 32]));
+        assert!(!p.b.has_session(receiver));
+        assert!(!p.b.has_session(0));
     }
 
     #[test]

@@ -632,6 +632,7 @@ impl Engine {
     /// (DERP, or a peer relay path).
     fn handle_wg(&mut self, pkt: Vec<u8>, udp_src: Option<SocketAddr>, derp_src: Option<NodePublicKey>) {
         let (ty, len) = (pkt.first().copied().unwrap_or(0), pkt.len());
+        let receiver = pkt.get(4..8).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
         let res = self.wg.recv(self.now, [PacketMut::from(pkt)]);
         log::trace!(
             "wg in type {ty} len {len} via {}: {} to local, {} replies",
@@ -639,8 +640,14 @@ impl Engine {
             res.to_local.values().map(Vec::len).sum::<usize>(),
             res.to_peers.values().map(Vec::len).sum::<usize>()
         );
-        // Transport data that produced nothing: a session we don't have.
-        if ty == 4 && res.to_local.is_empty() && res.to_peers.is_empty() {
+        // Transport data that produced nothing, for a session we don't have.
+        // (For one we do, it was a duplicate: Go sends each packet over both
+        // DERP and UDP while its direct path is unproven.)
+        if ty == 4
+            && res.to_local.is_empty()
+            && res.to_peers.is_empty()
+            && receiver.is_some_and(|r| !self.wg.has_session(r))
+        {
             if let Some(node_id) = self.peer_for_source(derp_src.as_ref(), udp_src) {
                 self.repair_session(node_id);
             }
