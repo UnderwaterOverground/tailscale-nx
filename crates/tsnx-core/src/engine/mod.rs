@@ -37,8 +37,10 @@ use packet::Prefix;
 pub enum Io {
     /// Resolve `host` (or parse it as an IP literal) and connect TCP. With
     /// `tls`, the driver does TLS with that server name too (on the Switch,
-    /// see [`crate::stream`]) and data is plaintext both ways.
-    Connect { id: ConnId, host: String, port: u16, tls: Option<String> },
+    /// see [`crate::stream`]) and data is plaintext both ways. `lossy`: each
+    /// `Send` is whole DERP frames, which the driver may drop when the
+    /// connection is backed up, as a full UDP socket would.
+    Connect { id: ConnId, host: String, port: u16, tls: Option<String>, lossy: bool },
     Send { id: ConnId, data: Vec<u8> },
     Close { id: ConnId },
     /// Send a datagram from the engine's UDP socket (WireGuard, disco, STUN).
@@ -557,7 +559,7 @@ impl Engine {
                 ControlIo::Connect { id, host, port, tls } => {
                     let g = self.alloc_conn(Owner::Control(id));
                     self.control_ids.insert(id, g);
-                    self.io.push_back(Io::Connect { id: g, host, port, tls });
+                    self.io.push_back(Io::Connect { id: g, host, port, tls, lossy: false });
                 }
                 ControlIo::Send { id, data } => {
                     if let Some(&g) = self.control_ids.get(&id) {
@@ -960,8 +962,10 @@ impl Engine {
     fn open_derp(&mut self, region: u32) {
         let Some(node) = self.derp_nodes.get(&region).cloned() else { return };
         let id = self.alloc_conn(Owner::Derp(region));
+        // With the driver's TLS, sends are plaintext frames it can drop
+        // whole; rustls' ciphertext can't be.
         let tls = stream::driver_tls_name(true, &node.hostname);
-        self.io.push_back(Io::Connect { id, host: node.connect_host.clone(), port: node.port, tls });
+        self.io.push_back(Io::Connect { id, host: node.connect_host.clone(), port: node.port, tls, lossy: stream::DRIVER_TLS });
         let now = self.now;
         let conn = Box::new(DerpConn { id, node, client: None, queue: VecDeque::new(), last_rx: now, last_used: now });
         self.derps.insert(region, conn);

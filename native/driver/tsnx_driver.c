@@ -49,6 +49,10 @@ static const char *volatile g_step;
 #define STEP(s) (g_step = (s))
 const char *tsnx_driver_step(void) { return g_step; }
 #define RECV_CHUNK 16384
+// What a lossy (DERP) connection may have waiting to be written; beyond it,
+// whole sends are dropped, as a full UDP socket would. A send rate above
+// what the relay takes otherwise grows the queue until an allocation fails.
+#define LOSSY_QUEUE_MAX (64 * 1024)
 
 // Conn.connecting
 #define CONNECTING_TCP 1
@@ -61,6 +65,8 @@ typedef struct {
     uint8_t *wbuf;  // bytes accepted from the engine but not yet written
     size_t wlen, wcap;
     char *tls_name;  // do TLS with this server name
+    int lossy;       // sends may be dropped (see LOSSY_QUEUE_MAX)
+    int dropping;    // has dropped (and logged it)
 #ifdef __SWITCH__
     TsnxSsl *ssl;  // TLS through the console's ssl service
 #endif
@@ -557,7 +563,12 @@ int tsnx_driver_batched_receive(TsnxDriver *d, int *bsd_errno) {
     return d->mmsg_state;
 }
 
-static void do_connect(TsnxDriver *d, uint32_t id, const char *target, uint16_t port, const char *tls_name) {
+static void driver_log(TsnxDriver *d, const char *text) {
+    TsnxEvent ev = {TSNX_EVENT_LOG, 0, text};
+    if (d->on_event) d->on_event(d->ctx, &ev);
+}
+
+static void do_connect(TsnxDriver *d, uint32_t id, const char *target, uint16_t port, const char *tls_name, int lossy) {
     STEP("TCP connect");
     char host[256];
     snprintf(host, sizeof host, "%s", target);
@@ -610,6 +621,7 @@ static void do_connect(TsnxDriver *d, uint32_t id, const char *target, uint16_t 
     c->fd = fd;
     c->connecting = CONNECTING_TCP;
     c->tls_name = name;
+    c->lossy = lossy;
 }
 
 static void pump_engine(TsnxDriver *d);
@@ -623,11 +635,6 @@ static int conn_up(TsnxDriver *d, Conn *c, uint32_t id) {
 }
 
 #ifdef __SWITCH__
-static void driver_log(TsnxDriver *d, const char *text) {
-    TsnxEvent ev = {TSNX_EVENT_LOG, 0, text};
-    if (d->on_event) d->on_event(d->ctx, &ev);
-}
-
 // TCP is up: start TLS, or log why not and close. Returns whether it started.
 static int tls_start(TsnxDriver *d, Conn *c) {
     STEP("TLS start");
@@ -734,10 +741,20 @@ static void pump_engine(TsnxDriver *d) {
         Conn *c;
         switch (io.kind) {
             case TSNX_IO_CONNECT:
-                do_connect(d, io.id, io.host, io.port, io.tls_name);
+                do_connect(d, io.id, io.host, io.port, io.tls_name, io.lossy);
                 break;
             case TSNX_IO_SEND:
                 c = conn_find(d, io.id);
+                if (c && c->lossy && c->wlen + io.len > LOSSY_QUEUE_MAX) {
+                    if (!c->dropping) {  // once per connection
+                        char msg[160];
+                        snprintf(msg, sizeof msg, "%s can't keep up with what we send: dropping packets",
+                                 c->tls_name ? c->tls_name : "a DERP relay");
+                        driver_log(d, msg);
+                        c->dropping = 1;
+                    }
+                    break;
+                }
                 if (c && conn_queue(c, io.data, io.len) != 0) {
                     conn_closed(d, c);
                 } else if (c && !c->connecting && conn_flush(c) != 0) {

@@ -93,6 +93,9 @@ typedef struct {
     // CONNECT: do TLS with this server name, or NULL for plain TCP. Only the
     // Switch's engine asks this (it has no TLS of its own; see tsnx_ssl.h).
     const char *tls_name;
+    // CONNECT: each SEND is whole DERP frames, which the driver may drop
+    // when the connection is backed up (as a full UDP socket would).
+    bool lossy;
     const uint8_t *data;  // valid until the next tsnx_engine_poll_io
     size_t len;
     TsnxAddr addr;        // SEND_UDP destination

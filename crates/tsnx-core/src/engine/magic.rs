@@ -698,7 +698,7 @@ impl Engine {
         let (host, port) = (node.connect_host.clone(), node.port);
         let id = self.alloc_conn(super::Owner::Probe(region));
         // Timing the TCP connect alone: no TLS.
-        self.io.push_back(Io::Connect { id, host, port, tls: None });
+        self.io.push_back(Io::Connect { id, host, port, tls: None, lossy: false });
         if let Some(p) = self.magic.tcp_probe.as_mut() {
             p.last = Some(region);
             p.current = Some((id, region, self.now));

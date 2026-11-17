@@ -43,6 +43,9 @@ pub struct TsnxIo {
     /// CONNECT: the server name to do TLS with, or NULL for plain TCP. Only
     /// the Switch's engine asks this of the driver.
     pub tls_name: *const c_char,
+    /// CONNECT: each SEND is whole DERP frames, which the driver may drop
+    /// when the connection is backed up.
+    pub lossy: bool,
     /// Bytes to send (SEND, SEND_UDP). Valid until the next `tsnx_engine_poll_io`.
     pub data: *const u8,
     pub len: usize,
@@ -167,12 +170,13 @@ pub unsafe extern "C" fn tsnx_engine_poll_io(e: *mut TsnxEngine, out: *mut TsnxI
         host: c"".as_ptr(),
         port: 0,
         tls_name: core::ptr::null(),
+        lossy: false,
         data: core::ptr::null(),
         len: 0,
         addr: TsnxAddr { family: 0, ip: [0; 16], port: 0 },
     };
     match io {
-        Io::Connect { id, host, port, tls } => {
+        Io::Connect { id, host, port, tls, lossy } => {
             // Both names in one buffer: "host\0tls\0".
             e.io_host = host.into_bytes();
             e.io_host.push(0);
@@ -185,6 +189,7 @@ pub unsafe extern "C" fn tsnx_engine_poll_io(e: *mut TsnxEngine, out: *mut TsnxI
             out.id = id;
             out.host = e.io_host.as_ptr().cast();
             out.port = port;
+            out.lossy = lossy;
             if tls.is_some() {
                 out.tls_name = e.io_host[tls_at..].as_ptr().cast();
             }
