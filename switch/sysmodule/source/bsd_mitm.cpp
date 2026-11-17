@@ -763,6 +763,10 @@ namespace ams::bsd_mitm {
                             done += part;
                         }
                     }
+                    // recvfrom reports the address's full length even when the
+                    // slot was shorter: keep to the slot, or the copy and the
+                    // packed reply would run past it.
+                    from_len = std::min<socklen_t>(from_len, static_cast<socklen_t>(std::min<size_t>(m.name_len, sizeof from)));
                     std::memcpy(data + m.name_off, std::addressof(from), from_len);
                     got.push_back(Got{n, from_len});
                 }
