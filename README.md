@@ -185,6 +185,12 @@ homebrew to tailnet addresses. It doesn't change how games or Nintendo
 services connect. MagicDNS leaves Atmosphère's DNS blocking of Nintendo
 servers in place.
 
+**Will it keep working after a system update?** Minor updates (say 23.5 to
+23.6) are fine. A new major version (24.0) needs a new tailscale-nx: until
+then it won't start, and the overlay tells you which firmware it runs on.
+Update Atmosphère first, as you would anyway. A new release normally follows
+soon after Atmosphère's, and the update notice lets you know when it's out.
+
 **The console crashes (orange screen) when I wake it during a Moonlight
 stream.** That's a Moonlight-Switch bug
 ([#306](https://github.com/XITRIX/Moonlight-Switch/issues/306)), and it
