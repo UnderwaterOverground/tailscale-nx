@@ -466,7 +466,13 @@ impl Netstack {
 
     pub fn peer_addr(&self, id: SockId) -> Option<SocketAddr> {
         match self.socks.get(&id)? {
-            Sock::Tcp(h) => self.sockets.get::<tcp::Socket>(*h).remote_endpoint().map(socket_addr),
+            Sock::Tcp(h) => {
+                let s = self.sockets.get::<tcp::Socket>(*h);
+                if matches!(s.state(), tcp::State::SynSent | tcp::State::SynReceived) {
+                    return None;
+                }
+                s.remote_endpoint().map(socket_addr)
+            }
             _ => None,
         }
     }
@@ -1231,6 +1237,7 @@ mod tests {
 
         let listener = b.tcp_listen(7, 4).unwrap();
         let client = a.tcp_connect(SocketAddr::new(b_ip, 7)).unwrap();
+        assert_eq!(a.peer_addr(client), None);
         let ua = a.udp_bind(5000).unwrap();
         let ub = b.udp_bind(6000).unwrap();
         a.udp_send_to(ua, b"datagram", SocketAddr::new(b_ip, 6000)).unwrap();
@@ -1271,6 +1278,7 @@ mod tests {
             }
         }
         assert_eq!(got, b"hello over smoltcp");
+        assert_eq!(a.peer_addr(client), Some(SocketAddr::new(b_ip, 7)));
         assert_eq!(dgram, Some((b"datagram".to_vec(), SocketAddr::new(a_ip, 5000))));
     }
 
@@ -1375,7 +1383,7 @@ mod tests {
         n.tcp_connect(peer(2)).expect("a closing socket gave way");
         while n.tcp_connect(peer(3)).is_ok() {}
         for &s in &open[2..] {
-            assert!(n.peer_addr(s).is_some(), "open ones are never evicted");
+            assert!(n.local_addr(s).is_some(), "open ones are never evicted");
         }
         assert!(n.buffer_usage() <= BUDGET);
     }

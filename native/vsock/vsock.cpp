@@ -644,7 +644,7 @@ Result VSock::GetPeerName(int fd, sockaddr *addr, socklen_t *len) {
 Result VSock::GetSockOpt(int fd, int level, int name, void *val, socklen_t *len) {
     VFd v;
     if (Get(fd, &v) && v.tcp && level == SOL_SOCKET && name == SO_ERROR && val && len && *len >= sizeof(int)) {
-        // Completion status of a non-blocking virtual connect.
+        // SO_ERROR stays zero while the handshake is pending.
         int err = 0;
         if (v.connecting) {
             uint32_t r = rt_.With([&](TsnxEngine *e) { return tsnx_net_readiness(e, v.tcp); });
@@ -656,8 +656,6 @@ Result VSock::GetSockOpt(int fd, int level, int name, void *val, socklen_t *len)
                 v.connecting = false;
                 Put(fd, v);
                 err = real_.Errno(Err::ConnRefused);
-            } else {
-                err = real_.Errno(Err::InProgress);
             }
         }
         *static_cast<int *>(val) = err;
